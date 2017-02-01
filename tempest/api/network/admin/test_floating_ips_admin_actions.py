@@ -14,7 +14,6 @@
 #    under the License.
 
 from tempest.api.network import base
-from tempest.common.utils import data_utils
 from tempest import config
 from tempest import test
 
@@ -26,9 +25,15 @@ class FloatingIPAdminTestJSON(base.BaseAdminNetworkTest):
     credentials = ['primary', 'alt', 'admin']
 
     @classmethod
+    def skip_checks(cls):
+        super(FloatingIPAdminTestJSON, cls).skip_checks()
+        if not test.is_extension_enabled('router', 'network'):
+            msg = "router extension not enabled."
+            raise cls.skipException(msg)
+
+    @classmethod
     def setup_clients(cls):
         super(FloatingIPAdminTestJSON, cls).setup_clients()
-        cls.alt_client = cls.alt_manager.network_client
         cls.alt_floating_ips_client = cls.alt_manager.floating_ips_client
 
     @classmethod
@@ -38,8 +43,7 @@ class FloatingIPAdminTestJSON(base.BaseAdminNetworkTest):
         cls.floating_ip = cls.create_floatingip(cls.ext_net_id)
         cls.network = cls.create_network()
         cls.subnet = cls.create_subnet(cls.network)
-        cls.router = cls.create_router(data_utils.rand_name('router-'),
-                                       external_network_id=cls.ext_net_id)
+        cls.router = cls.create_router(external_network_id=cls.ext_net_id)
         cls.create_router_interface(cls.router['id'], cls.subnet['id'])
         cls.port = cls.create_port(cls.network)
 
@@ -68,7 +72,7 @@ class FloatingIPAdminTestJSON(base.BaseAdminNetworkTest):
         body = self.floating_ips_client.list_floatingips()
         floating_ip_ids = [f['id'] for f in body['floatingips']]
         # Check that nonadmin user doesn't see floating ip created from admin
-        # and floating ip that is created in another tenant (alt user)
+        # and floating ip that is created in another project (alt user)
         self.assertIn(self.floating_ip['id'], floating_ip_ids)
         self.assertNotIn(floating_ip_admin['floatingip']['id'],
                          floating_ip_ids)

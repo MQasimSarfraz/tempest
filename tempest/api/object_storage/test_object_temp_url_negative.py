@@ -17,10 +17,10 @@ import hmac
 import time
 
 from six.moves.urllib import parse as urlparse
-from tempest_lib import exceptions as lib_exc
 
 from tempest.api.object_storage import base
 from tempest.common.utils import data_utils
+from tempest.lib import exceptions as lib_exc
 from tempest import test
 
 
@@ -33,9 +33,7 @@ class ObjectTempUrlNegativeTest(base.BaseObjectTest):
     def resource_setup(cls):
         super(ObjectTempUrlNegativeTest, cls).resource_setup()
 
-        cls.container_name = data_utils.rand_name(name='TestContainer')
-        cls.container_client.create_container(cls.container_name)
-        cls.containers = [cls.container_name]
+        cls.container_name = cls.create_container()
 
         # update account metadata
         cls.key = 'Meta'
@@ -49,7 +47,7 @@ class ObjectTempUrlNegativeTest(base.BaseObjectTest):
         resp, _ = cls.account_client.delete_account_metadata(
             metadata=cls.metadata)
 
-        cls.delete_containers(cls.containers)
+        cls.delete_containers()
 
         super(ObjectTempUrlNegativeTest, cls).resource_cleanup()
 
@@ -82,7 +80,9 @@ class ObjectTempUrlNegativeTest(base.BaseObjectTest):
             container, object_name)
 
         hmac_body = '%s\n%s\n%s' % (method, expires, path)
-        sig = hmac.new(key, hmac_body, hashlib.sha1).hexdigest()
+        sig = hmac.new(
+            key.encode(), hmac_body.encode(), hashlib.sha1
+        ).hexdigest()
 
         url = "%s/%s?temp_url_sig=%s&temp_url_expires=%s" % (container,
                                                              object_name,

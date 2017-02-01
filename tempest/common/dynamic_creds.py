@@ -15,23 +15,25 @@
 import netaddr
 from oslo_log import log as logging
 import six
-from tempest_lib import exceptions as lib_exc
 
 from tempest import clients
-from tempest.common import cred_client
-from tempest.common import cred_provider
-from tempest.common.utils import data_utils
-from tempest import config
-from tempest import exceptions
+from tempest.lib.common import cred_client
+from tempest.lib.common import cred_provider
+from tempest.lib.common.utils import data_utils
+from tempest.lib import exceptions as lib_exc
 
-CONF = config.CONF
 LOG = logging.getLogger(__name__)
 
 
 class DynamicCredentialProvider(cred_provider.CredentialProvider):
 
     def __init__(self, identity_version, name=None, network_resources=None,
-                 credentials_domain=None, admin_role=None, admin_creds=None):
+                 credentials_domain=None, admin_role=None, admin_creds=None,
+                 identity_admin_domain_scope=False,
+                 identity_admin_role='admin', extra_roles=None,
+                 neutron_available=False, create_networks=True,
+                 project_network_cidr=None, project_network_mask_bits=None,
+                 public_network_id=None, resource_prefix=None):
         """Creates credentials dynamically for tests
 
         A credential provider that, based on an initial set of
@@ -48,6 +50,23 @@ class DynamicCredentialProvider(cred_provider.CredentialProvider):
         :param dict network_resources: network resources to be created for
                                        the created credentials
         :param Credentials admin_creds: initial admin credentials
+        :param bool identity_admin_domain_scope: Set to true if admin should be
+                                                 scoped to the domain. By
+                                                 default this is False and the
+                                                 admin role is scoped to the
+                                                 project.
+        :param str identity_admin_role: The role name to use for admin
+        :param list extra_roles: A list of strings for extra roles that should
+                                 be assigned to all created users
+        :param bool neutron_available: Whether we are running in an environemnt
+                                       with neutron
+        :param bool create_networks: Whether dynamic project networks should be
+                                     created or not
+        :param project_network_cidr: The CIDR to use for created project
+                                     networks
+        :param project_network_mask_bits: The network mask bits to use for
+                                          created project networks
+        :param public_network_id: The id for the public network to use
         """
         super(DynamicCredentialProvider, self).__init__(
             identity_version=identity_version, admin_role=admin_role,
@@ -56,11 +75,26 @@ class DynamicCredentialProvider(cred_provider.CredentialProvider):
         self.network_resources = network_resources
         self._creds = {}
         self.ports = []
+        self.resource_prefix = resource_prefix or ''
+        self.neutron_available = neutron_available
+        self.create_networks = create_networks
+        self.project_network_cidr = project_network_cidr
+        self.project_network_mask_bits = project_network_mask_bits
+        self.public_network_id = public_network_id
         self.default_admin_creds = admin_creds
-        (self.identity_admin_client, self.network_admin_client,
+        self.identity_admin_domain_scope = identity_admin_domain_scope
+        self.identity_admin_role = identity_admin_role or 'admin'
+        self.extra_roles = extra_roles or []
+        (self.identity_admin_client,
+         self.tenants_admin_client,
+         self.users_admin_client,
+         self.roles_admin_client,
+         self.domains_admin_client,
          self.networks_admin_client,
+         self.routers_admin_client,
          self.subnets_admin_client,
-         self.ports_admin_client) = self._get_admin_clients()
+         self.ports_admin_client,
+         self.security_groups_admin_client) = self._get_admin_clients()
         # Domain where isolated credentials are provisioned (v3 only).
         # Use that of the admin account is None is configured.
         self.creds_domain_name = None
@@ -69,7 +103,12 @@ class DynamicCredentialProvider(cred_provider.CredentialProvider):
                 self.default_admin_creds.project_domain_name or
                 self.credentials_domain)
         self.creds_client = cred_client.get_creds_client(
-            self.identity_admin_client, self.creds_domain_name)
+            self.identity_admin_client,
+            self.tenants_admin_client,
+            self.users_admin_client,
+            self.roles_admin_client,
+            self.domains_admin_client,
+            self.creds_domain_name)
 
     def _get_admin_clients(self):
         """Returns a tuple with instances of the following admin clients
@@ -80,46 +119,62 @@ class DynamicCredentialProvider(cred_provider.CredentialProvider):
         """
         os = clients.Manager(self.default_admin_creds)
         if self.identity_version == 'v2':
-            return (os.identity_client, os.network_client, os.networks_client,
-                    os.subnets_client, os.ports_client)
+            return (os.identity_client, os.tenants_client, os.users_client,
+                    os.roles_client, None,
+                    os.networks_client, os.routers_client, os.subnets_client,
+                    os.ports_client, os.security_groups_client)
         else:
-            return (os.identity_v3_client, os.network_client,
-                    os.networks_client, os.subnets_client, os.ports_client)
+            # We use a dedicated client manager for identity client in case we
+            # need a different token scope for them.
+            scope = 'domain' if self.identity_admin_domain_scope else 'project'
+            identity_os = clients.Manager(self.default_admin_creds,
+                                          scope=scope)
+            return (identity_os.identity_v3_client,
+                    identity_os.projects_client,
+                    identity_os.users_v3_client, identity_os.roles_v3_client,
+                    identity_os.domains_client,
+                    os.networks_client, os.routers_client,
+                    os.subnets_client, os.ports_client,
+                    os.security_groups_client)
 
-    def _create_creds(self, suffix="", admin=False, roles=None):
-        """Create random credentials under the following schema.
+    def _create_creds(self, admin=False, roles=None):
+        """Create credentials with random name.
 
-        If the name contains a '.' is the full class path of something, and
-        we don't really care. If it isn't, it's probably a meaningful name,
-        so use it.
+        Creates project and user. When admin flag is True create user
+        with admin role. Assign user with additional roles (for example
+        _member_) and roles requested by caller.
 
-        For logging purposes, -user and -tenant are long and redundant,
-        don't use them. The user# will be sufficient to figure it out.
+        :param admin: Flag if to assign to the user admin role
+        :type admin: bool
+        :param roles: Roles to assign for the user
+        :type roles: list
+        :return: Readonly Credentials with network resources
         """
-        if '.' in self.name:
-            root = ""
-        else:
-            root = self.name
+        root = self.name
 
-        project_name = data_utils.rand_name(root) + suffix
+        project_name = data_utils.rand_name(root, prefix=self.resource_prefix)
         project_desc = project_name + "-desc"
         project = self.creds_client.create_project(
             name=project_name, description=project_desc)
 
-        username = data_utils.rand_name(root) + suffix
+        # NOTE(andreaf) User and project can be distinguished from the context,
+        # having the same ID in both makes it easier to match them and debug.
+        username = project_name
         user_password = data_utils.rand_password()
-        email = data_utils.rand_name(root) + suffix + "@example.com"
+        email = data_utils.rand_name(
+            root, prefix=self.resource_prefix) + "@example.com"
         user = self.creds_client.create_user(
             username, user_password, project, email)
-        if 'user' in user:
-            user = user['user']
         role_assigned = False
         if admin:
-            self.creds_client.assign_user_role(user, project,
-                                               self.admin_role)
+            self.creds_client.assign_user_role(user, project, self.admin_role)
             role_assigned = True
+            if (self.identity_version == 'v3' and
+                    self.identity_admin_domain_scope):
+                self.creds_client.assign_user_role_on_domain(
+                    user, self.identity_admin_role)
         # Add roles specified in config file
-        for conf_role in CONF.auth.tempest_roles:
+        for conf_role in self.extra_roles:
             self.creds_client.assign_user_role(user, project, conf_role)
             role_assigned = True
         # Add roles requested by caller
@@ -131,13 +186,30 @@ class DynamicCredentialProvider(cred_provider.CredentialProvider):
         # it must beassigned a role on the project. So we need to ensure that
         # our newly created user has a role on the newly created project.
         if self.identity_version == 'v3' and not role_assigned:
-            self.creds_client.create_user_role('Member')
+            try:
+                self.creds_client.create_user_role('Member')
+            except lib_exc.Conflict:
+                LOG.warning('Member role already exists, ignoring conflict.')
             self.creds_client.assign_user_role(user, project, 'Member')
 
         creds = self.creds_client.get_credentials(user, project, user_password)
         return cred_provider.TestResources(creds)
 
     def _create_network_resources(self, tenant_id):
+        """The function creates network resources in the given tenant.
+
+        The function checks if network_resources class member is empty,
+        In case it is, it will create a network, a subnet and a router for
+        the tenant according to the given tenant id parameter.
+        Otherwise it will create a network resource according
+        to the values from network_resources dict.
+
+        :param tenant_id: The tenant id to create resources for.
+        :type tenant_id: str
+        :raises: InvalidConfiguration, Exception
+        :returns: network resources(network,subnet,router)
+        :rtype: tuple
+        """
         network = None
         subnet = None
         router = None
@@ -146,35 +218,43 @@ class DynamicCredentialProvider(cred_provider.CredentialProvider):
             if self.network_resources['router']:
                 if (not self.network_resources['subnet'] or
                     not self.network_resources['network']):
-                    raise exceptions.InvalidConfiguration(
+                    raise lib_exc.InvalidConfiguration(
                         'A router requires a subnet and network')
             elif self.network_resources['subnet']:
                 if not self.network_resources['network']:
-                    raise exceptions.InvalidConfiguration(
+                    raise lib_exc.InvalidConfiguration(
                         'A subnet requires a network')
             elif self.network_resources['dhcp']:
-                raise exceptions.InvalidConfiguration('DHCP requires a subnet')
+                raise lib_exc.InvalidConfiguration('DHCP requires a subnet')
 
-        data_utils.rand_name_root = data_utils.rand_name(self.name)
+        rand_name_root = data_utils.rand_name(
+            self.name, prefix=self.resource_prefix)
         if not self.network_resources or self.network_resources['network']:
-            network_name = data_utils.rand_name_root + "-network"
+            network_name = rand_name_root + "-network"
             network = self._create_network(network_name, tenant_id)
         try:
             if not self.network_resources or self.network_resources['subnet']:
-                subnet_name = data_utils.rand_name_root + "-subnet"
+                subnet_name = rand_name_root + "-subnet"
                 subnet = self._create_subnet(subnet_name, tenant_id,
                                              network['id'])
             if not self.network_resources or self.network_resources['router']:
-                router_name = data_utils.rand_name_root + "-router"
+                router_name = rand_name_root + "-router"
                 router = self._create_router(router_name, tenant_id)
                 self._add_router_interface(router['id'], subnet['id'])
         except Exception:
-            if router:
-                self._clear_isolated_router(router['id'], router['name'])
-            if subnet:
-                self._clear_isolated_subnet(subnet['id'], subnet['name'])
-            if network:
-                self._clear_isolated_network(network['id'], network['name'])
+            try:
+                if router:
+                    self._clear_isolated_router(router['id'], router['name'])
+                if subnet:
+                    self._clear_isolated_subnet(subnet['id'], subnet['name'])
+                if network:
+                    self._clear_isolated_network(network['id'],
+                                                 network['name'])
+            except Exception as cleanup_exception:
+                msg = "There was an exception trying to setup network " \
+                      "resources for tenant %s, and this error happened " \
+                      "trying to clean them up: %s"
+                LOG.warning(msg, tenant_id, cleanup_exception)
             raise
         return network, subnet, router
 
@@ -184,8 +264,8 @@ class DynamicCredentialProvider(cred_provider.CredentialProvider):
         return resp_body['network']
 
     def _create_subnet(self, subnet_name, tenant_id, network_id):
-        base_cidr = netaddr.IPNetwork(CONF.network.tenant_network_cidr)
-        mask_bits = CONF.network.tenant_network_mask_bits
+        base_cidr = netaddr.IPNetwork(self.project_network_cidr)
+        mask_bits = self.project_network_mask_bits
         for subnet_cidr in base_cidr.subnet(mask_bits):
             try:
                 if self.network_resources:
@@ -214,16 +294,16 @@ class DynamicCredentialProvider(cred_provider.CredentialProvider):
 
     def _create_router(self, router_name, tenant_id):
         external_net_id = dict(
-            network_id=CONF.network.public_network_id)
-        resp_body = self.network_admin_client.create_router(
-            router_name,
+            network_id=self.public_network_id)
+        resp_body = self.routers_admin_client.create_router(
+            name=router_name,
             external_gateway_info=external_net_id,
             tenant_id=tenant_id)
         return resp_body['router']
 
     def _add_router_interface(self, router_id, subnet_id):
-        self.network_admin_client.add_router_interface_with_subnet_id(
-            router_id, subnet_id)
+        self.routers_admin_client.add_router_interface(router_id,
+                                                       subnet_id=subnet_id)
 
     def get_credentials(self, credential_type):
         if self._creds.get(str(credential_type)):
@@ -236,17 +316,15 @@ class DynamicCredentialProvider(cred_provider.CredentialProvider):
                 credentials = self._create_creds(roles=credential_type)
             self._creds[str(credential_type)] = credentials
             # Maintained until tests are ported
-            LOG.info("Acquired dynamic creds:\n credentials: %s"
-                     % credentials)
-            if (CONF.service_available.neutron and
-                not CONF.baremetal.driver_enabled and
-                CONF.auth.create_isolated_networks):
+            LOG.info("Acquired dynamic creds:\n credentials: %s", credentials)
+            if (self.neutron_available and
+                self.create_networks):
                 network, subnet, router = self._create_network_resources(
                     credentials.tenant_id)
                 credentials.set_resources(network=network, subnet=subnet,
                                           router=router)
                 LOG.info("Created isolated network resources for : \n"
-                         + " credentials: %s" % credentials)
+                         + " credentials: %s", credentials)
         return credentials
 
     def get_primary_creds(self):
@@ -273,43 +351,43 @@ class DynamicCredentialProvider(cred_provider.CredentialProvider):
         return self.get_credentials(roles)
 
     def _clear_isolated_router(self, router_id, router_name):
-        net_client = self.network_admin_client
+        client = self.routers_admin_client
         try:
-            net_client.delete_router(router_id)
+            client.delete_router(router_id)
         except lib_exc.NotFound:
-            LOG.warn('router with name: %s not found for delete' %
-                     router_name)
+            LOG.warning('router with name: %s not found for delete',
+                        router_name)
 
     def _clear_isolated_subnet(self, subnet_id, subnet_name):
         client = self.subnets_admin_client
         try:
             client.delete_subnet(subnet_id)
         except lib_exc.NotFound:
-            LOG.warn('subnet with name: %s not found for delete' %
-                     subnet_name)
+            LOG.warning('subnet with name: %s not found for delete',
+                        subnet_name)
 
     def _clear_isolated_network(self, network_id, network_name):
         net_client = self.networks_admin_client
         try:
             net_client.delete_network(network_id)
         except lib_exc.NotFound:
-            LOG.warn('network with name: %s not found for delete' %
-                     network_name)
+            LOG.warning('network with name: %s not found for delete',
+                        network_name)
 
     def _cleanup_default_secgroup(self, tenant):
-        net_client = self.network_admin_client
-        resp_body = net_client.list_security_groups(tenant_id=tenant,
+        nsg_client = self.security_groups_admin_client
+        resp_body = nsg_client.list_security_groups(tenant_id=tenant,
                                                     name="default")
         secgroups_to_delete = resp_body['security_groups']
         for secgroup in secgroups_to_delete:
             try:
-                net_client.delete_security_group(secgroup['id'])
+                nsg_client.delete_security_group(secgroup['id'])
             except lib_exc.NotFound:
-                LOG.warn('Security group %s, id %s not found for clean-up' %
-                         (secgroup['name'], secgroup['id']))
+                LOG.warning('Security group %s, id %s not found for clean-up',
+                            secgroup['name'], secgroup['id'])
 
     def _clear_isolated_net_resources(self):
-        net_client = self.network_admin_client
+        client = self.routers_admin_client
         for cred in self._creds:
             creds = self._creds.get(cred)
             if (not creds or not any([creds.router, creds.network,
@@ -322,11 +400,12 @@ class DynamicCredentialProvider(cred_provider.CredentialProvider):
             if (not self.network_resources or
                     (self.network_resources.get('router') and creds.subnet)):
                 try:
-                    net_client.remove_router_interface_with_subnet_id(
-                        creds.router['id'], creds.subnet['id'])
+                    client.remove_router_interface(
+                        creds.router['id'],
+                        subnet_id=creds.subnet['id'])
                 except lib_exc.NotFound:
-                    LOG.warn('router with name: %s not found for delete' %
-                             creds.router['name'])
+                    LOG.warning('router with name: %s not found for delete',
+                                creds.router['name'])
                 self._clear_isolated_router(creds.router['id'],
                                             creds.router['name'])
             if (not self.network_resources or
@@ -346,15 +425,24 @@ class DynamicCredentialProvider(cred_provider.CredentialProvider):
             try:
                 self.creds_client.delete_user(creds.user_id)
             except lib_exc.NotFound:
-                LOG.warn("user with name: %s not found for delete" %
-                         creds.username)
+                LOG.warning("user with name: %s not found for delete",
+                            creds.username)
+            # NOTE(zhufl): Only when neutron's security_group ext is
+            # enabled, _cleanup_default_secgroup will not raise error. But
+            # here cannot use test.is_extension_enabled for it will cause
+            # "circular dependency". So here just use try...except to
+            # ensure tenant deletion without big changes.
             try:
-                if CONF.service_available.neutron:
+                if self.neutron_available:
                     self._cleanup_default_secgroup(creds.tenant_id)
+            except lib_exc.NotFound:
+                LOG.warning("failed to cleanup tenant %s's secgroup",
+                            creds.tenant_name)
+            try:
                 self.creds_client.delete_project(creds.tenant_id)
             except lib_exc.NotFound:
-                LOG.warn("tenant with name: %s not found for delete" %
-                         creds.tenant_name)
+                LOG.warning("tenant with name: %s not found for delete",
+                            creds.tenant_name)
         self._creds = {}
 
     def is_multi_user(self):

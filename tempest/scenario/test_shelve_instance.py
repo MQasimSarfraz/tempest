@@ -13,17 +13,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_log import log
-import testtools
-
+from tempest.common import compute
 from tempest.common import waiters
 from tempest import config
 from tempest.scenario import manager
 from tempest import test
 
 CONF = config.CONF
-
-LOG = log.getLogger(__name__)
 
 
 class TestShelveInstance(manager.ScenarioTest):
@@ -37,19 +33,16 @@ class TestShelveInstance(manager.ScenarioTest):
 
     """
 
+    @classmethod
+    def skip_checks(cls):
+        super(TestShelveInstance, cls).skip_checks()
+        if not CONF.compute_feature_enabled.shelve:
+            raise cls.skipException("Shelve is not available.")
+
     def _shelve_then_unshelve_server(self, server):
-        self.servers_client.shelve_server(server['id'])
-        offload_time = CONF.compute.shelved_offload_time
-        if offload_time >= 0:
-            waiters.wait_for_server_status(self.servers_client, server['id'],
-                                           'SHELVED_OFFLOADED',
-                                           extra_timeout=offload_time)
-        else:
-            waiters.wait_for_server_status(self.servers_client,
-                                           server['id'], 'SHELVED')
-            self.servers_client.shelve_offload_server(server['id'])
-            waiters.wait_for_server_status(self.servers_client, server['id'],
-                                           'SHELVED_OFFLOADED')
+        compute.shelve_server(self.servers_client, server['id'],
+                              force_shelve_offload=True)
+
         self.servers_client.unshelve_server(server['id'])
         waiters.wait_for_server_status(self.servers_client, server['id'],
                                        'ACTIVE')
@@ -59,26 +52,15 @@ class TestShelveInstance(manager.ScenarioTest):
 
         security_group = self._create_security_group()
         security_groups = [{'name': security_group['name']}]
-        create_kwargs = {
-            'key_name': keypair['name'],
-            'security_groups': security_groups
-        }
 
-        if boot_from_volume:
-            volume = self.create_volume(size=CONF.volume.volume_size,
-                                        imageRef=CONF.compute.image_ref)
-            bd_map = [{
-                'device_name': 'vda',
-                'volume_id': volume['id'],
-                'delete_on_termination': '0'}]
+        server = self.create_server(
+            image_id=CONF.compute.image_ref,
+            key_name=keypair['name'],
+            security_groups=security_groups,
+            wait_until='ACTIVE',
+            volume_backed=boot_from_volume)
 
-            create_kwargs['block_device_mapping'] = bd_map
-            server = self.create_server(create_kwargs=create_kwargs)
-        else:
-            server = self.create_server(image=CONF.compute.image_ref,
-                                        create_kwargs=create_kwargs)
-
-        instance_ip = self.get_server_or_ip(server)
+        instance_ip = self.get_server_ip(server)
         timestamp = self.create_timestamp(instance_ip,
                                           private_key=keypair['private_key'])
 
@@ -92,15 +74,11 @@ class TestShelveInstance(manager.ScenarioTest):
         self.assertEqual(timestamp, timestamp2)
 
     @test.idempotent_id('1164e700-0af0-4a4c-8792-35909a88743c')
-    @testtools.skipUnless(CONF.compute_feature_enabled.shelve,
-                          'Shelve is not available.')
     @test.services('compute', 'network', 'image')
     def test_shelve_instance(self):
         self._create_server_then_shelve_and_unshelve()
 
     @test.idempotent_id('c1b6318c-b9da-490b-9c67-9339b627271f')
-    @testtools.skipUnless(CONF.compute_feature_enabled.shelve,
-                          'Shelve is not available.')
     @test.services('compute', 'volume', 'network', 'image')
     def test_shelve_volume_backed_instance(self):
         self._create_server_then_shelve_and_unshelve(boot_from_volume=True)

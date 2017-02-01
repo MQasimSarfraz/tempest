@@ -1,5 +1,18 @@
+========================
+Team and repository tags
+========================
+
+.. image:: http://governance.openstack.org/badges/tempest.svg
+    :target: http://governance.openstack.org/reference/tags/index.html
+    :remote:
+
+.. Change things from this point on
+
 Tempest - The OpenStack Integration Test Suite
 ==============================================
+
+The documentation for Tempest is officially hosted at:
+http://docs.openstack.org/developer/tempest/
 
 This is a set of integration tests to be run against a live OpenStack
 cluster. Tempest has batteries of tests for OpenStack API validation,
@@ -17,8 +30,7 @@ Tempest Design Principles that we strive to live by.
   discover features of a cloud incorrectly, and give people an
   incorrect assessment of their cloud. Explicit is always better.
 - Tempest uses OpenStack public interfaces. Tests in Tempest should
-  only touch public interfaces, API calls (native or 3rd party),
-  or libraries.
+  only touch public OpenStack APIs.
 - Tempest should not touch private or implementation specific
   interfaces. This means not directly going to the database, not
   directly hitting the hypervisors, not testing extensions not
@@ -50,27 +62,29 @@ as it is simpler, and quicker to work with.
 #. You first need to install Tempest. This is done with pip after you check out
    the Tempest repo::
 
-    $ git clone https://github.com/openstack/tempest/
+    $ git clone http://git.openstack.org/openstack/tempest
     $ pip install tempest/
 
    This can be done within a venv, but the assumption for this guide is that
    the Tempest cli entry point will be in your shell's PATH.
 
-#. Installing Tempest will create a /etc/tempest dir which will contain the
-   sample config file packaged with Tempest. The contents of /etc/tempest will
-   be copied to all local working dirs, so if there is any common configuration
-   you'd like to be shared between anyone setting up local Tempest working dirs
-   it's recommended that you copy or rename tempest.conf.sample to tempest.conf
-   and make those changes to that file in /etc/tempest
+#. Installing Tempest may create a /etc/tempest dir, however if one isn't
+   created you can create one or use ~/.tempest/etc or ~/.config/tempest in
+   place of /etc/tempest. If none of these dirs are created tempest will create
+   ~/.tempest/etc when it's needed. The contents of this dir will always
+   automatically be copied to all etc/ dirs in local workspaces as an initial
+   setup step. So if there is any common configuration you'd like to be shared
+   between local Tempest workspaces it's recommended that you pre-populate it
+   before running ``tempest init``.
 
-#. Setup a local working Tempest dir. This is done using the tempest init
+#. Setup a local Tempest workspace. This is done by using the tempest init
    command::
 
-    tempest init cloud-01
+    $ tempest init cloud-01
 
-   works the same as::
+   which also works the same as::
 
-    mkdir cloud-01 && cd cloud-01 && tempest init
+    $ mkdir cloud-01 && cd cloud-01 && tempest init
 
    This will create a new directory for running a single Tempest configuration.
    If you'd like to run Tempest against multiple OpenStack deployments the idea
@@ -81,18 +95,72 @@ as it is simpler, and quicker to work with.
    config files located in the etc/ subdir created by the ``tempest init``
    command. Tempest is expecting a tempest.conf file in etc/ so if only a
    sample exists you must rename or copy it to tempest.conf before making
-   any changes to it otherwise Tempest will not know how to load it.
+   any changes to it otherwise Tempest will not know how to load it. For
+   details on configuring tempest refer to the :ref:`tempest-configuration`.
 
 #. Once the configuration is done you're now ready to run Tempest. This can
-   be done with testr directly or any `testr`_ based test runner, like
-   `ostestr`_. For example, from the working dir running::
+   be done using the :ref:`tempest_run` command. This can be done by either
+   running::
 
-     $ ostestr --regex '(?!.*\[.*\bslow\b.*\])(^tempest\.(api|scenario|thirdparty))'
+    $ tempest run
+
+   from the Tempest workspace directory. Or you can use the ``--workspace``
+   argument to run in the workspace you created regarless of your current
+   working directory. For example::
+
+    $ tempest run --workspace cloud-01
+
+   There is also the option to use testr directly, or any `testr`_ based test
+   runner, like `ostestr`_. For example, from the workspace dir run::
+
+    $ ostestr --regex '(?!.*\[.*\bslow\b.*\])(^tempest\.(api|scenario))'
 
    will run the same set of tests as the default gate jobs.
 
 .. _testr: https://testrepository.readthedocs.org/en/latest/MANUAL.html
 .. _ostestr: http://docs.openstack.org/developer/os-testr/
+
+Library
+-------
+Tempest exposes a library interface. This interface is a stable interface and
+should be backwards compatible (including backwards compatibility with the
+old tempest-lib package, with the exception of the import). If you plan to
+directly consume tempest in your project you should only import code from the
+tempest library interface, other pieces of tempest do not have the same
+stable interface and there are no guarantees on the Python API unless otherwise
+stated.
+
+For more details refer to the library documentation here: :ref:`library`
+
+Release Versioning
+------------------
+`Tempest Release Notes <http://docs.openstack.org/releasenotes/tempest>`_
+shows what changes have been released on each version.
+
+Tempest's released versions are broken into 2 sets of information. Depending on
+how you intend to consume tempest you might need
+
+The version is a set of 3 numbers:
+
+X.Y.Z
+
+While this is almost `semver`_ like, the way versioning is handled is slightly
+different:
+
+X is used to represent the supported OpenStack releases for tempest tests
+in-tree, and to signify major feature changes to tempest. It's a monotonically
+increasing integer where each version either indicates a new supported OpenStack
+release, the drop of support for an OpenStack release (which will coincide with
+the upstream stable branch going EOL), or a major feature lands (or is removed)
+from tempest.
+
+Y.Z is used to represent library interface changes. This is treated the same
+way as minor and patch versions from `semver`_ but only for the library
+interface. When Y is incremented we've added functionality to the library
+interface and when Z is incremented it's a bug fix release for the library.
+Also note that both Y and Z are reset to 0 at each increment of X.
+
+.. _semver: http://semver.org/
 
 Configuration
 -------------
@@ -103,9 +171,9 @@ Tempest. The etc/tempest.conf.sample attempts to be a self-documenting version
 of the configuration.
 
 You can generate a new sample tempest.conf file, run the following
-command from the top level of the Tempest directory:
+command from the top level of the Tempest directory::
 
-  tox -egenconfig
+    $ tox -egenconfig
 
 The most important pieces that are needed are the user ids, openstack
 endpoint, and basic flavors and images needed to run tests.
@@ -116,16 +184,15 @@ Unit Tests
 Tempest also has a set of unit tests which test the Tempest code itself. These
 tests can be run by specifying the test discovery path::
 
-    $> OS_TEST_PATH=./tempest/tests testr run --parallel
+    $ OS_TEST_PATH=./tempest/tests testr run --parallel
 
 By setting OS_TEST_PATH to ./tempest/tests it specifies that test discover
 should only be run on the unit test directory. The default value of OS_TEST_PATH
 is OS_TEST_PATH=./tempest/test_discover which will only run test discover on the
 Tempest suite.
 
-Alternatively, you can use the run_tests.sh script which will create a venv and
-run the unit tests. There are also the py27 and py34 tox jobs which will run
-the unit tests with the corresponding version of python.
+Alternatively, there are the py27 and py34 tox jobs which will run the unit
+tests with the corresponding version of python.
 
 Python 2.6
 ----------
@@ -139,18 +206,18 @@ on an earlier release with python 2.6 you can easily run Tempest against it
 from a remote system running python 2.7. (or deploy a cloud guest in your cloud
 that has python 2.7)
 
-Python 3.4
+Python 3.x
 ----------
 
 Starting during the Liberty release development cycle work began on enabling
 Tempest to run under both Python 2.7 and Python 3.4. Tempest strives to fully
-support running with Python 3.4. A gating unit test job was added to also run
-Tempest's unit tests under Python 3.4. This means that the Tempest code at
-least imports under Python 3.4 and things that have unit test coverage will
-work on Python 3.4. However, because large parts of Tempest are self-verifying
-there might be uncaught issues running on Python 3.4. So until there is a gating
-job which does a full Tempest run using Python 3.4 there isn't any guarantee
-that running Tempest under Python 3.4 is bug free.
+support running with Python 3.4 and newer. A gating unit test job was added to
+also run Tempest's unit tests under Python 3. This means that the Tempest
+code at least imports under Python 3.4 and things that have unit test coverage
+will work on Python 3.4. However, because large parts of Tempest are
+self-verifying there might be uncaught issues running on Python 3. So until
+there is a gating job which does a full Tempest run using Python 3 there
+isn't any guarantee that running Tempest under Python 3 is bug free.
 
 Legacy run method
 -----------------
@@ -167,9 +234,9 @@ create and configure that.
 To start you need to create a configuration file. The easiest way to create a
 configuration file is to generate a sample in the ``etc/`` directory ::
 
-    $> cd $TEMPEST_ROOT_DIR
-    $> oslo-config-generator --config-file \
-        etc/config-generator.tempest.conf \
+    $ cd $TEMPEST_ROOT_DIR
+    $ oslo-config-generator --config-file \
+        tempest/cmd/config-generator.tempest.conf \
         --output-file etc/tempest.conf
 
 After that, open up the ``etc/tempest.conf`` file and edit the
@@ -190,21 +257,21 @@ used tool. Also, the nosetests test runner is **not** recommended to run Tempest
 After setting up your configuration file, you can execute the set of Tempest
 tests by using ``testr`` ::
 
-    $> testr run --parallel
+    $ testr run --parallel
 
 To run one single test serially ::
 
-    $> testr run tempest.api.compute.servers.test_servers_negative.ServersNegativeTestJSON.test_reboot_non_existent_server
+    $ testr run tempest.api.compute.servers.test_servers_negative.ServersNegativeTestJSON.test_reboot_non_existent_server
 
 Alternatively, you can use the run_tempest.sh script which will create a venv
 and run the tests or use tox to do the same. Tox also contains several existing
 job configurations. For example::
 
-   $> tox -efull
+    $ tox -efull
 
 which will run the same set of tests as the OpenStack gate. (it's exactly how
 the gate invokes Tempest) Or::
 
-  $> tox -esmoke
+    $ tox -esmoke
 
 to run the tests tagged as smoke.

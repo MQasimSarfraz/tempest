@@ -19,7 +19,7 @@ from tempest.api.compute import base
 from tempest.common.utils import data_utils
 from tempest.common import waiters
 from tempest import config
-from tempest import test
+from tempest.lib import decorators
 
 
 CONF = config.CONF
@@ -39,24 +39,23 @@ class VolumesGetTestJSON(base.BaseV2ComputeTest):
         super(VolumesGetTestJSON, cls).setup_clients()
         cls.client = cls.volumes_extensions_client
 
-    @test.idempotent_id('f10f25eb-9775-4d9d-9cbe-1cf54dae9d5f')
+    @decorators.idempotent_id('f10f25eb-9775-4d9d-9cbe-1cf54dae9d5f')
     def test_volume_create_get_delete(self):
         # CREATE, GET, DELETE Volume
-        volume = None
-        v_name = data_utils.rand_name('Volume')
+        v_name = data_utils.rand_name(self.__class__.__name__ + '-Volume')
         metadata = {'Type': 'work'}
         # Create volume
         volume = self.client.create_volume(size=CONF.volume.volume_size,
                                            display_name=v_name,
                                            metadata=metadata)['volume']
-        self.addCleanup(self.delete_volume, volume['id'])
         self.assertIn('id', volume)
+        self.addCleanup(self.delete_volume, volume['id'])
         self.assertIn('displayName', volume)
         self.assertEqual(volume['displayName'], v_name,
                          "The created volume name is not equal "
                          "to the requested name")
-        self.assertTrue(volume['id'] is not None,
-                        "Field volume id is empty or not found.")
+        self.assertIsNotNone(volume['id'],
+                             "Field volume id is empty or not found.")
         # Wait for Volume status to become ACTIVE
         waiters.wait_for_volume_status(self.client, volume['id'], 'available')
         # GET Volume
@@ -65,6 +64,10 @@ class VolumesGetTestJSON(base.BaseV2ComputeTest):
         self.assertEqual(v_name,
                          fetched_volume['displayName'],
                          'The fetched Volume is different '
+                         'from the created Volume')
+        self.assertEqual(CONF.volume.volume_size,
+                         fetched_volume['size'],
+                         'The fetched volume size is different '
                          'from the created Volume')
         self.assertEqual(volume['id'],
                          fetched_volume['id'],

@@ -14,27 +14,22 @@
 #    under the License.
 
 from tempest.api.volume import base
-from tempest import config
+from tempest.common import waiters
 from tempest import test
-
-CONF = config.CONF
 
 
 class VolumesV2ExtendTest(base.BaseVolumeTest):
-
-    @classmethod
-    def setup_clients(cls):
-        super(VolumesV2ExtendTest, cls).setup_clients()
-        cls.client = cls.volumes_client
 
     @test.idempotent_id('9a36df71-a257-43a5-9555-dc7c88e66e0e')
     def test_volume_extend(self):
         # Extend Volume Test.
         self.volume = self.create_volume()
         extend_size = int(self.volume['size']) + 1
-        self.client.extend_volume(self.volume['id'], extend_size)
-        self.client.wait_for_volume_status(self.volume['id'], 'available')
-        volume = self.client.show_volume(self.volume['id'])['volume']
+        self.volumes_client.extend_volume(self.volume['id'],
+                                          new_size=extend_size)
+        waiters.wait_for_volume_status(self.volumes_client,
+                                       self.volume['id'], 'available')
+        volume = self.volumes_client.show_volume(self.volume['id'])['volume']
         self.assertEqual(int(volume['size']), extend_size)
 
 

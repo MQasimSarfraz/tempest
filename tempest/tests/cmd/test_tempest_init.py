@@ -13,7 +13,6 @@
 # under the License.
 
 import os
-import shutil
 
 import fixtures
 
@@ -36,27 +35,70 @@ class TestTempestInit(base.TestCase):
         testr_conf_file = init.TESTR_CONF % (top_level_path, discover_path)
 
         conf_path = conf_dir.join('.testr.conf')
-        conf_file = open(conf_path, 'r')
-        self.addCleanup(conf_file.close)
-        self.assertEqual(conf_file.read(), testr_conf_file)
+        with open(conf_path, 'r') as conf_file:
+            self.assertEqual(conf_file.read(), testr_conf_file)
 
     def test_generate_sample_config(self):
         local_dir = self.useFixture(fixtures.TempDir())
         etc_dir_path = os.path.join(local_dir.path, 'etc/')
         os.mkdir(etc_dir_path)
-        tmp_dir = self.useFixture(fixtures.TempDir())
-        config_dir = os.path.join(tmp_dir.path, 'config/')
-        shutil.copytree('etc/', config_dir)
         init_cmd = init.TempestInit(None, None)
         local_sample_conf_file = os.path.join(etc_dir_path,
                                               'tempest.conf.sample')
+
         # Verify no sample config file exist
         self.assertFalse(os.path.isfile(local_sample_conf_file))
-        init_cmd.generate_sample_config(local_dir.path, config_dir)
+        init_cmd.generate_sample_config(local_dir.path)
 
         # Verify sample config file exist with some content
         self.assertTrue(os.path.isfile(local_sample_conf_file))
         self.assertGreater(os.path.getsize(local_sample_conf_file), 0)
+
+    def test_update_local_conf(self):
+        local_dir = self.useFixture(fixtures.TempDir())
+        etc_dir_path = os.path.join(local_dir.path, 'etc/')
+        os.mkdir(etc_dir_path)
+        lock_dir = os.path.join(local_dir.path, 'tempest_lock')
+        config_path = os.path.join(etc_dir_path, 'tempest.conf')
+        log_dir = os.path.join(local_dir.path, 'logs')
+
+        init_cmd = init.TempestInit(None, None)
+
+        # Generate the config file
+        init_cmd.generate_sample_config(local_dir.path)
+
+        # Create a conf file with populated values
+        config_parser_pre = init_cmd.get_configparser(config_path)
+        with open(config_path, 'w+') as conf_file:
+            # create the same section init will check for and add values to
+            config_parser_pre.add_section('oslo_concurrency')
+            config_parser_pre.set('oslo_concurrency', 'TEST', local_dir.path)
+            # create a new section
+            config_parser_pre.add_section('TEST')
+            config_parser_pre.set('TEST', 'foo', "bar")
+            config_parser_pre.write(conf_file)
+
+        # Update the config file the same way tempest init does
+        init_cmd.update_local_conf(config_path, lock_dir, log_dir)
+
+        # parse the new config file to verify it
+        config_parser_post = init_cmd.get_configparser(config_path)
+
+        # check that our value in oslo_concurrency wasn't overwritten
+        self.assertTrue(config_parser_post.has_section('oslo_concurrency'))
+        self.assertEqual(config_parser_post.get('oslo_concurrency', 'TEST'),
+                         local_dir.path)
+        # check that the lock directory was set correctly
+        self.assertEqual(config_parser_post.get('oslo_concurrency',
+                                                'lock_path'), lock_dir)
+
+        # check that our new section still exists and wasn't modified
+        self.assertTrue(config_parser_post.has_section('TEST'))
+        self.assertEqual(config_parser_post.get('TEST', 'foo'), 'bar')
+
+        # check that the DEFAULT values are correct
+        # NOTE(auggy): has_section ignores DEFAULT
+        self.assertEqual(config_parser_post.get('DEFAULT', 'log_dir'), log_dir)
 
     def test_create_working_dir_with_existing_local_dir_non_empty(self):
         fake_local_dir = self.useFixture(fixtures.TempDir())
@@ -95,3 +137,18 @@ class TestTempestInit(base.TestCase):
         self.assertTrue(os.path.isfile(fake_file_moved))
         self.assertTrue(os.path.isfile(local_conf_file))
         self.assertTrue(os.path.isfile(local_testr_conf))
+
+    def test_take_action_fails(self):
+        class ParsedArgs(object):
+            workspace_dir = self.useFixture(fixtures.TempDir()).path
+            workspace_path = os.path.join(workspace_dir, 'workspace.yaml')
+            name = 'test'
+            dir_base = self.useFixture(fixtures.TempDir()).path
+            dir = os.path.join(dir_base, 'foo', 'bar')
+            config_dir = self.useFixture(fixtures.TempDir()).path
+            show_global_dir = False
+        pa = ParsedArgs()
+        init_cmd = init.TempestInit(None, None)
+        self.assertRaises(OSError, init_cmd.take_action, pa)
+        # one more trying should be a same error not "workspace already exists"
+        self.assertRaises(OSError, init_cmd.take_action, pa)

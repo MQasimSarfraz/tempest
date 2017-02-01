@@ -11,11 +11,11 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-import logging
 import sys
 
 from cliff import app
 from cliff import commandmanager
+from oslo_log import log as logging
 from pbr import version
 
 
@@ -26,8 +26,9 @@ class Main(app.App):
     def __init__(self):
         super(Main, self).__init__(
             description='Tempest cli application',
-            version=version.VersionInfo('tempest').version_string(),
+            version=version.VersionInfo('tempest').version_string_with_vcs(),
             command_manager=commandmanager.CommandManager('tempest.cm'),
+            deferred_help=True,
             )
 
     def initialize_app(self, argv):

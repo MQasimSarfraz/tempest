@@ -12,9 +12,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from tempest_lib import exceptions as lib_exc
-
 from tempest.api.orchestration import base
+from tempest.lib import exceptions as lib_exc
 from tempest import test
 
 
@@ -28,7 +27,7 @@ Resources:
     Type: AWS::IAM::User
 """
 
-    invalid_template_url = 'http://www.example.com/template.yaml'
+    invalid_template_url = 'http:///template.yaml'
 
     @classmethod
     def resource_setup(cls):
@@ -58,4 +57,4 @@ class TemplateAWSNegativeTestJSON(TemplateYAMLNegativeTestJSON):
 }
 """
 
-    invalid_template_url = 'http://www.example.com/template.template'
+    invalid_template_url = 'http:///template.template'

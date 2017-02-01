@@ -16,12 +16,11 @@
 import netaddr
 import random
 
-import six
-from tempest_lib import exceptions as lib_exc
-
 from tempest.api.network import base
 from tempest.common.utils import data_utils
+from tempest.common.utils import net_info
 from tempest import config
+from tempest.lib import exceptions as lib_exc
 from tempest import test
 
 CONF = config.CONF
@@ -30,7 +29,7 @@ CONF = config.CONF
 class NetworksTestDHCPv6(base.BaseNetworkTest):
     _ip_version = 6
 
-    """ Test DHCPv6 specific features using SLAAC, stateless and
+    """Test DHCPv6 specific features using SLAAC, stateless and
     stateful settings for subnets. Also it shall check dual-stack
     functionality (IPv4 + IPv6 together).
     The tests include:
@@ -66,11 +65,10 @@ class NetworksTestDHCPv6(base.BaseNetworkTest):
         body = self.ports_client.list_ports()
         ports = body['ports']
         for port in ports:
-            if (port['device_owner'].startswith('network:router_interface')
-                and port['device_id'] in [r['id'] for r in self.routers]):
-                self.client.remove_router_interface_with_port_id(
-                    port['device_id'], port['id']
-                )
+            if (net_info.is_router_interface_port(port) and
+                port['device_id'] in [r['id'] for r in self.routers]):
+                self.routers_client.remove_router_interface(port['device_id'],
+                                                            port_id=port['id'])
             else:
                 if port['id'] in [p['id'] for p in self.ports]:
                     self.ports_client.delete_port(port['id'])
@@ -81,11 +79,11 @@ class NetworksTestDHCPv6(base.BaseNetworkTest):
             if subnet['id'] in [s['id'] for s in self.subnets]:
                 self.subnets_client.delete_subnet(subnet['id'])
                 self._remove_from_list_by_index(self.subnets, subnet)
-        body = self.client.list_routers()
+        body = self.routers_client.list_routers()
         routers = body['routers']
         for router in routers:
             if router['id'] in [r['id'] for r in self.routers]:
-                self.client.delete_router(router['id'])
+                self.routers_client.delete_router(router['id'])
                 self._remove_from_list_by_index(self.routers, router)
 
     def _get_ips_from_subnet(self, **kwargs):
@@ -126,7 +124,7 @@ class NetworksTestDHCPv6(base.BaseNetworkTest):
         ):
             kwargs = {'ipv6_ra_mode': ra_mode,
                       'ipv6_address_mode': add_mode}
-            kwargs = dict((k, v) for k, v in six.iteritems(kwargs) if v)
+            kwargs = dict((k, v) for k, v in kwargs.items() if v)
             real_ip, eui_ip = self._get_ips_from_subnet(**kwargs)
             self._clean_network()
             self.assertEqual(eui_ip, real_ip,
@@ -269,7 +267,7 @@ class NetworksTestDHCPv6(base.BaseNetworkTest):
         ):
             kwargs = {'ipv6_ra_mode': ra_mode,
                       'ipv6_address_mode': add_mode}
-            kwargs = dict((k, v) for k, v in six.iteritems(kwargs) if v)
+            kwargs = dict((k, v) for k, v in kwargs.items() if v)
             subnet = self.create_subnet(self.network, **kwargs)
             port = self.create_port(self.network)
             port_ip = next(iter(port['fixed_ips']), None)['ip_address']
@@ -291,7 +289,7 @@ class NetworksTestDHCPv6(base.BaseNetworkTest):
         ):
             kwargs = {'ipv6_ra_mode': ra_mode,
                       'ipv6_address_mode': add_mode}
-            kwargs = dict((k, v) for k, v in six.iteritems(kwargs) if v)
+            kwargs = dict((k, v) for k, v in kwargs.items() if v)
             subnet = self.create_subnet(self.network, **kwargs)
             ip_range = netaddr.IPRange(subnet["allocation_pools"][0]["start"],
                                        subnet["allocation_pools"][0]["end"])
@@ -339,18 +337,16 @@ class NetworksTestDHCPv6(base.BaseNetworkTest):
                          fixed_ips=[
                              {'subnet_id': subnet['id'],
                               'ip_address': ip}])
-        self.assertRaisesRegexp(lib_exc.Conflict,
-                                "object with that identifier already exists",
-                                self.create_port,
-                                self.network,
-                                fixed_ips=[{'subnet_id': subnet['id'],
-                                            'ip_address': ip}])
+        self.assertRaisesRegex(lib_exc.Conflict,
+                               "IpAddressAlreadyAllocated|IpAddressInUse",
+                               self.create_port,
+                               self.network,
+                               fixed_ips=[{'subnet_id': subnet['id'],
+                                           'ip_address': ip}])
 
     def _create_subnet_router(self, kwargs):
         subnet = self.create_subnet(self.network, **kwargs)
-        router = self.create_router(
-            router_name=data_utils.rand_name("routerv6-"),
-            admin_state_up=True)
+        router = self.create_router(admin_state_up=True)
         port = self.create_router_interface(router['id'],
                                             subnet['id'])
         body = self.ports_client.show_port(port['port_id'])
@@ -366,7 +362,7 @@ class NetworksTestDHCPv6(base.BaseNetworkTest):
         ):
             kwargs = {'ipv6_ra_mode': ra_mode,
                       'ipv6_address_mode': add_mode}
-            kwargs = dict((k, v) for k, v in six.iteritems(kwargs) if v)
+            kwargs = dict((k, v) for k, v in kwargs.items() if v)
             subnet, port = self._create_subnet_router(kwargs)
             port_ip = next(iter(port['fixed_ips']), None)['ip_address']
             self._clean_network()

@@ -2,7 +2,7 @@ Reviewing Tempest Code
 ======================
 
 To start read the `OpenStack Common Review Checklist
-<https://wiki.openstack.org/wiki/ReviewChecklist#Common_Review_Checklist>`_
+<http://docs.openstack.org/infra/manual/developers.html#peer-review>`_
 
 
 Ensuring code is executed
@@ -12,6 +12,13 @@ For any new or change to a test it has to be verified in the gate. This means
 that the first thing to check with any change is that a gate job actually runs
 it. Tests which aren't executed either because of configuration or skips should
 not be accepted.
+
+If a new test is added that depends on a new config option (like a feature
+flag), the commit message must reference a change in DevStack or DevStack-Gate
+that enables the execution of this newly introduced test. This reference could
+either be a `Cross-Repository Dependency <http://docs.openstack.org/infra/
+manual/developers.html#cross-repository-dependencies>`_ or a simple link
+to a Gerrit review.
 
 
 Unit Tests
@@ -72,6 +79,25 @@ level docstring linking to the API ref doc in the API tests and a docstring for
 scenario tests this is up to the reviewers discretion whether a docstring is
 required or not.
 
+Release Notes
+-------------
+Release notes are how we indicate to users and other consumers of Tempest what
+has changed in a given release. Since Tempest 10.0.0 we've been using `reno`_
+to manage and build the release notes. There are certain types of changes that
+require release notes and we should not approve them without including a release
+note. These include but aren't limited to, any addition, deprecation or removal
+from the lib interface, any change to configuration options (including
+deprecation), CLI additions or deprecations, major feature additions, and
+anything backwards incompatible or would require a user to take note or do
+something extra.
+
+.. _reno: http://docs.openstack.org/developer/reno/
+
+Deprecated Code
+---------------
+Sometimes we have some bugs in deprecated code. Basically, we leave it. Because
+we don't need to maintain it. However, if the bug is critical, we might need to
+fix it. When it will happen, we will deal with it on a case-by-case basis.
 
 When to approve
 ---------------

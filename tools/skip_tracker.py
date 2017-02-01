@@ -20,23 +20,25 @@ Track test skips via launchpadlib API and raise alerts if a bug
 is fixed but a skip is still in the Tempest test code
 """
 
-import logging
 import os
 import re
 
 from launchpadlib import launchpad
+from oslo_log import log as logging
 
 BASEDIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 TESTDIR = os.path.join(BASEDIR, 'tempest')
 LPCACHEDIR = os.path.expanduser('~/.launchpadlib/cache')
 
+LOG = logging.getLogger(__name__)
+
 
 def info(msg, *args, **kwargs):
-    logging.info(msg, *args, **kwargs)
+    LOG.info(msg, *args, **kwargs)
 
 
 def debug(msg, *args, **kwargs):
-    logging.debug(msg, *args, **kwargs)
+    LOG.debug(msg, *args, **kwargs)
 
 
 def find_skips(start=TESTDIR):
@@ -73,35 +75,35 @@ def find_skips_in_file(path):
     DEF_RE = re.compile(r'\s*def (\w+)\(')
     bug_found = False
     results = []
-    lines = open(path, 'rb').readlines()
-    for x, line in enumerate(lines):
-        if not bug_found:
-            res = BUG_RE.match(line)
-            if res:
-                bug_no = int(res.group(1))
-                debug("Found bug skip %s on line %d", bug_no, x + 1)
-                bug_found = True
-        else:
-            res = DEF_RE.match(line)
-            if res:
-                method = res.group(1)
-                debug("Found test method %s skips for bug %d", method, bug_no)
-                results.append((method, bug_no))
-                bug_found = False
+    with open(path, 'rb') as content:
+        lines = content.readlines()
+        for x, line in enumerate(lines):
+            if not bug_found:
+                res = BUG_RE.match(line)
+                if res:
+                    bug_no = int(res.group(1))
+                    debug("Found bug skip %s on line %d", bug_no, x + 1)
+                    bug_found = True
+            else:
+                res = DEF_RE.match(line)
+                if res:
+                    method = res.group(1)
+                    debug("Found test method %s skips for bug %d",
+                          method, bug_no)
+                    results.append((method, bug_no))
+                    bug_found = False
     return results
 
 
 def get_results(result_dict):
     results = []
-    for bug_no in result_dict.keys():
+    for bug_no in result_dict:
         for method in result_dict[bug_no]:
             results.append((method, bug_no))
     return results
 
 
 if __name__ == '__main__':
-    logging.basicConfig(format='%(levelname)s: %(message)s',
-                        level=logging.INFO)
     results = find_skips()
     unique_bugs = sorted(set([bug for (method, bug) in get_results(results)]))
     unskips = []

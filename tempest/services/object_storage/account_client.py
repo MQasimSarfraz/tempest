@@ -18,10 +18,10 @@ from xml.etree import ElementTree as etree
 from oslo_serialization import jsonutils as json
 from six.moves.urllib import parse as urllib
 
-from tempest.common import service_client
+from tempest.lib.common import rest_client
 
 
-class AccountClient(service_client.ServiceClient):
+class AccountClient(rest_client.RestClient):
 
     def create_account(self, data=None,
                        params=None,
@@ -143,14 +143,4 @@ class AccountClient(service_client.ServiceClient):
         else:
             body = body.strip().splitlines()
         self.expected_success([200, 204], resp.status)
-        return resp, body
-
-    def list_extensions(self):
-        self.skip_path()
-        try:
-            resp, body = self.get('info')
-        finally:
-            self.reset_path()
-        body = json.loads(body)
-        self.expected_success(200, resp.status)
         return resp, body

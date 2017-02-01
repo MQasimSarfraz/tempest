@@ -10,7 +10,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_log import log
+from oslo_log import log as logging
 
 from tempest.common.utils import data_utils
 from tempest.common import waiters
@@ -19,23 +19,15 @@ from tempest.scenario import manager
 from tempest import test
 
 CONF = config.CONF
-
-LOG = log.getLogger(__name__)
+LOG = logging.getLogger(__name__)
 
 
 class TestVolumeBootPattern(manager.ScenarioTest):
 
-    """This test case attempts to reproduce the following steps:
+    # Boot from volume scenario is quite slow, and needs extra
+    # breathing room to get through deletes in the time allotted.
+    TIMEOUT_SCALING_FACTOR = 2
 
-     * Create in Cinder some bootable volume importing a Glance image
-     * Boot an instance from the bootable volume
-     * Write content to the volume
-     * Delete an instance and Boot a new instance from the volume
-     * Check written content in the instance
-     * Create a volume snapshot while the instance is running
-     * Boot an additional instance from the new snapshot based volume
-     * Check written content in the instance booted from snapshot
-    """
     @classmethod
     def skip_checks(cls):
         super(TestVolumeBootPattern, cls).skip_checks()
@@ -44,7 +36,8 @@ class TestVolumeBootPattern(manager.ScenarioTest):
 
     def _create_volume_from_image(self):
         img_uuid = CONF.compute.image_ref
-        vol_name = data_utils.rand_name('volume-origin')
+        vol_name = data_utils.rand_name(
+            self.__class__.__name__ + '-volume-origin')
         return self.create_volume(name=vol_name, imageRef=img_uuid)
 
     def _get_bdm(self, vol_id, delete_on_termination=False):
@@ -69,10 +62,14 @@ class TestVolumeBootPattern(manager.ScenarioTest):
                 {'name': security_group['name']}]
         create_kwargs.update(self._get_bdm(
             vol_id, delete_on_termination=delete_on_termination))
-        return self.create_server(image='', create_kwargs=create_kwargs)
+        return self.create_server(
+            image_id='',
+            wait_until='ACTIVE',
+            **create_kwargs)
 
     def _create_snapshot_from_volume(self, vol_id):
-        snap_name = data_utils.rand_name('snapshot')
+        snap_name = data_utils.rand_name(
+            self.__class__.__name__ + '-snapshot')
         snap = self.snapshots_client.create_snapshot(
             volume_id=vol_id,
             force=True,
@@ -80,7 +77,8 @@ class TestVolumeBootPattern(manager.ScenarioTest):
         self.addCleanup(
             self.snapshots_client.wait_for_resource_deletion, snap['id'])
         self.addCleanup(self.snapshots_client.delete_snapshot, snap['id'])
-        self.snapshots_client.wait_for_snapshot_status(snap['id'], 'available')
+        waiters.wait_for_snapshot_status(self.snapshots_client,
+                                         snap['id'], 'available')
 
         # NOTE(e0ne): Cinder API v2 uses name instead of display_name
         if 'display_name' in snap:
@@ -90,10 +88,6 @@ class TestVolumeBootPattern(manager.ScenarioTest):
 
         return snap
 
-    def _create_volume_from_snapshot(self, snap_id):
-        vol_name = data_utils.rand_name('volume')
-        return self.create_volume(name=vol_name, snapshot_id=snap_id)
-
     def _delete_server(self, server):
         self.servers_client.delete_server(server['id'])
         waiters.wait_for_server_termination(self.servers_client, server['id'])
@@ -102,43 +96,70 @@ class TestVolumeBootPattern(manager.ScenarioTest):
     @test.attr(type='smoke')
     @test.services('compute', 'volume', 'image')
     def test_volume_boot_pattern(self):
+
+        """This test case attempts to reproduce the following steps:
+
+        * Create in Cinder some bootable volume importing a Glance image
+        * Boot an instance from the bootable volume
+        * Write content to the volume
+        * Delete an instance and Boot a new instance from the volume
+        * Check written content in the instance
+        * Create a volume snapshot while the instance is running
+        * Boot an additional instance from the new snapshot based volume
+        * Check written content in the instance booted from snapshot
+        """
+
+        LOG.info("Creating keypair and security group")
         keypair = self.create_keypair()
         security_group = self._create_security_group()
 
         # create an instance from volume
+        LOG.info("Booting instance 1 from volume")
         volume_origin = self._create_volume_from_image()
         instance_1st = self._boot_instance_from_volume(volume_origin['id'],
                                                        keypair, security_group)
+        LOG.info("Booted first instance: %s", instance_1st)
 
         # write content to volume on instance
-        ip_instance_1st = self.get_server_or_ip(instance_1st)
+        LOG.info("Setting timestamp in instance %s", instance_1st)
+        ip_instance_1st = self.get_server_ip(instance_1st)
         timestamp = self.create_timestamp(ip_instance_1st,
                                           private_key=keypair['private_key'])
 
         # delete instance
+        LOG.info("Deleting first instance: %s", instance_1st)
         self._delete_server(instance_1st)
 
         # create a 2nd instance from volume
         instance_2nd = self._boot_instance_from_volume(volume_origin['id'],
                                                        keypair, security_group)
+        LOG.info("Booted second instance %s", instance_2nd)
 
         # check the content of written file
-        ip_instance_2nd = self.get_server_or_ip(instance_2nd)
+        LOG.info("Getting timestamp in instance %s", instance_2nd)
+        ip_instance_2nd = self.get_server_ip(instance_2nd)
         timestamp2 = self.get_timestamp(ip_instance_2nd,
                                         private_key=keypair['private_key'])
         self.assertEqual(timestamp, timestamp2)
 
         # snapshot a volume
+        LOG.info("Creating snapshot from volume: %s", volume_origin['id'])
         snapshot = self._create_snapshot_from_volume(volume_origin['id'])
 
         # create a 3rd instance from snapshot
-        volume = self._create_volume_from_snapshot(snapshot['id'])
+        LOG.info("Creating third instance from snapshot: %s", snapshot['id'])
+        volume = self.create_volume(snapshot_id=snapshot['id'],
+                                    size=snapshot['size'])
+        LOG.info("Booting third instance from snapshot")
         server_from_snapshot = (
             self._boot_instance_from_volume(volume['id'],
                                             keypair, security_group))
+        LOG.info("Booted third instance %s", server_from_snapshot)
 
         # check the content of written file
-        server_from_snapshot_ip = self.get_server_or_ip(server_from_snapshot)
+        LOG.info("Logging into third instance to get timestamp: %s",
+                 server_from_snapshot)
+        server_from_snapshot_ip = self.get_server_ip(server_from_snapshot)
         timestamp3 = self.get_timestamp(server_from_snapshot_ip,
                                         private_key=keypair['private_key'])
         self.assertEqual(timestamp, timestamp3)
@@ -151,14 +172,14 @@ class TestVolumeBootPattern(manager.ScenarioTest):
         instance = self._boot_instance_from_volume(volume_origin['id'],
                                                    delete_on_termination=True)
         # create EBS image
-        name = data_utils.rand_name('image')
-        image = self.create_server_snapshot(instance, name=name)
+        image = self.create_server_snapshot(instance)
 
         # delete instance
         self._delete_server(instance)
 
         # boot instance from EBS image
-        instance = self.create_server(image=image['id'])
+        instance = self.create_server(
+            image_id=image['id'])
         # just ensure that instance booted
 
         # delete instance

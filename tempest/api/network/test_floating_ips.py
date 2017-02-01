@@ -13,10 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import netaddr
-
 from tempest.api.network import base
-from tempest.common.utils import data_utils
+from tempest.common.utils import net_utils
 from tempest import config
 from tempest import test
 
@@ -55,11 +53,9 @@ class FloatingIPTestJSON(base.BaseNetworkTest):
 
         # Create network, subnet, router and add interface
         cls.network = cls.create_network()
-        cls.subnet = cls.create_subnet(cls.network)
-        cls.router = cls.create_router(data_utils.rand_name('router-'),
-                                       external_network_id=cls.ext_net_id)
+        cls.subnet = cls.create_subnet(cls.network, enable_dhcp=False)
+        cls.router = cls.create_router(external_network_id=cls.ext_net_id)
         cls.create_router_interface(cls.router['id'], cls.subnet['id'])
-        cls.port = list()
         # Create two ports one each for Creation and Updating of floatingIP
         for i in range(2):
             cls.create_port(cls.network)
@@ -158,8 +154,7 @@ class FloatingIPTestJSON(base.BaseNetworkTest):
         self.assertEqual(created_floating_ip['router_id'], self.router['id'])
         network2 = self.create_network()
         subnet2 = self.create_subnet(network2)
-        router2 = self.create_router(data_utils.rand_name('router-'),
-                                     external_network_id=self.ext_net_id)
+        router2 = self.create_router(external_network_id=self.ext_net_id)
         self.create_router_interface(router2['id'], subnet2['id'])
         port_other_router = self.create_port(network2)
         # Associate floating IP to the other port on another router
@@ -193,8 +188,12 @@ class FloatingIPTestJSON(base.BaseNetworkTest):
     @test.idempotent_id('45c4c683-ea97-41ef-9c51-5e9802f2f3d7')
     def test_create_update_floatingip_with_port_multiple_ip_address(self):
         # Find out ips that can be used for tests
-        ips = list(netaddr.IPNetwork(self.subnet['cidr']))
-        list_ips = [str(ip) for ip in ips[-3:-1]]
+        list_ips = net_utils.get_unused_ip_addresses(
+            self.ports_client,
+            self.subnets_client,
+            self.subnet['network_id'],
+            self.subnet['id'],
+            2)
         fixed_ips = [{'ip_address': list_ips[0]}, {'ip_address': list_ips[1]}]
         # Create port
         body = self.ports_client.create_port(network_id=self.network['id'],

@@ -19,12 +19,12 @@ import re
 from oslo_log import log as logging
 import testtools
 
-from tempest.common.utils import data_utils
 from tempest.common import waiters
 from tempest import config
-from tempest import exceptions
+from tempest.lib.common.utils import test_utils
+from tempest.lib import decorators
+from tempest.lib import exceptions
 from tempest.scenario import manager
-from tempest.services.network import resources as net_resources
 from tempest import test
 
 CONF = config.CONF
@@ -59,7 +59,7 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
      Determine which types of networks to test as follows:
 
      * Configure tenant network checks (via the
-       'tenant_networks_reachable' key) if the Tempest host should
+       'project_networks_reachable' key) if the Tempest host should
        have direct connectivity to tenant networks.  This is likely to
        be the case if Tempest is running on the same host as a
        single-node devstack installation with IP namespaces disabled.
@@ -81,9 +81,9 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
     @classmethod
     def skip_checks(cls):
         super(TestNetworkBasicOps, cls).skip_checks()
-        if not (CONF.network.tenant_networks_reachable
+        if not (CONF.network.project_networks_reachable
                 or CONF.network.public_network_id):
-            msg = ('Either tenant_networks_reachable must be "true", or '
+            msg = ('Either project_networks_reachable must be "true", or '
                    'public_network_id must be defined.')
             raise cls.skipException(msg)
         for ext in ['router', 'security-group']:
@@ -104,8 +104,7 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
 
     def _setup_network_and_servers(self, **kwargs):
         boot_with_port = kwargs.pop('boot_with_port', False)
-        self.security_group = \
-            self._create_security_group(tenant_id=self.tenant_id)
+        self.security_group = self._create_security_group()
         self.network, self.subnet, self.router = self.create_networks(**kwargs)
         self.check_networks()
 
@@ -113,11 +112,10 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
         self.port_id = None
         if boot_with_port:
             # create a port on the network and boot with that
-            self.port_id = self._create_port(self.network['id']).id
+            self.port_id = self._create_port(self.network['id'])['id']
             self.ports.append({'port': self.port_id})
 
-        name = data_utils.rand_name('server-smoke')
-        server = self._create_server(name, self.network, self.port_id)
+        server = self._create_server(self.network, self.port_id)
         self._check_tenant_network_connectivity()
 
         floating_ip = self.create_floating_ip(server)
@@ -132,39 +130,38 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
         seen_nets = self._list_networks()
         seen_names = [n['name'] for n in seen_nets]
         seen_ids = [n['id'] for n in seen_nets]
-        self.assertIn(self.network.name, seen_names)
-        self.assertIn(self.network.id, seen_ids)
+        self.assertIn(self.network['name'], seen_names)
+        self.assertIn(self.network['id'], seen_ids)
 
         if self.subnet:
             seen_subnets = self._list_subnets()
             seen_net_ids = [n['network_id'] for n in seen_subnets]
             seen_subnet_ids = [n['id'] for n in seen_subnets]
-            self.assertIn(self.network.id, seen_net_ids)
-            self.assertIn(self.subnet.id, seen_subnet_ids)
+            self.assertIn(self.network['id'], seen_net_ids)
+            self.assertIn(self.subnet['id'], seen_subnet_ids)
 
         if self.router:
             seen_routers = self._list_routers()
             seen_router_ids = [n['id'] for n in seen_routers]
             seen_router_names = [n['name'] for n in seen_routers]
-            self.assertIn(self.router.name,
+            self.assertIn(self.router['name'],
                           seen_router_names)
-            self.assertIn(self.router.id,
+            self.assertIn(self.router['id'],
                           seen_router_ids)
 
-    def _create_server(self, name, network, port_id=None):
+    def _create_server(self, network, port_id=None):
         keypair = self.create_keypair()
         self.keypairs[keypair['name']] = keypair
         security_groups = [{'name': self.security_group['name']}]
-        create_kwargs = {
-            'networks': [
-                {'uuid': network.id},
-            ],
-            'key_name': keypair['name'],
-            'security_groups': security_groups,
-        }
+        network = {'uuid': network['id']}
         if port_id is not None:
-            create_kwargs['networks'][0]['port'] = port_id
-        server = self.create_server(name=name, create_kwargs=create_kwargs)
+            network['port'] = port_id
+
+        server = self.create_server(
+            networks=[network],
+            key_name=keypair['name'],
+            security_groups=security_groups,
+            wait_until='ACTIVE')
         self.servers.append(server)
         return server
 
@@ -172,7 +169,7 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
         return self.keypairs[server['key_name']]['private_key']
 
     def _check_tenant_network_connectivity(self):
-        ssh_login = CONF.compute.image_ssh_user
+        ssh_login = CONF.validation.image_ssh_user
         for server in self.servers:
             # call the common method in the parent class
             super(TestNetworkBasicOps, self).\
@@ -182,7 +179,7 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
 
     def check_public_network_connectivity(
             self, should_connect=True, msg=None,
-            should_check_floating_ip_status=True):
+            should_check_floating_ip_status=True, mtu=None):
         """Verifies connectivty to a VM via public network and floating IP
 
         and verifies floating IP has resource status is correct.
@@ -194,10 +191,11 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
         to indicate the context of the failure
         :param should_check_floating_ip_status: bool. should status of
         floating_ip be checked or not
+        :param mtu: int. MTU network to use for connectivity validation
         """
-        ssh_login = CONF.compute.image_ssh_user
+        ssh_login = CONF.validation.image_ssh_user
         floating_ip, server = self.floating_ip_tuple
-        ip_address = floating_ip.floating_ip_address
+        ip_address = floating_ip['floating_ip_address']
         private_key = None
         floatingip_status = 'DOWN'
         if should_connect:
@@ -209,7 +207,7 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
         # call the common method in the parent class
         super(TestNetworkBasicOps, self).check_public_network_connectivity(
             ip_address, ssh_login, private_key, should_connect, msg,
-            self.servers)
+            self.servers, mtu=mtu)
 
     def _disassociate_floating_ips(self):
         floating_ip, server = self.floating_ip_tuple
@@ -219,15 +217,14 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
 
     def _reassociate_floating_ips(self):
         floating_ip, server = self.floating_ip_tuple
-        name = data_utils.rand_name('new_server-smoke')
         # create a new server for the floating ip
-        server = self._create_server(name, self.network)
+        server = self._create_server(self.network)
         self._associate_floating_ip(floating_ip, server)
         self.floating_ip_tuple = Floating_IP_tuple(
             floating_ip, server)
 
     def _create_new_network(self, create_gateway=False):
-        self.new_net = self._create_network(tenant_id=self.tenant_id)
+        self.new_net = self._create_network()
         if create_gateway:
             self.new_subnet = self._create_subnet(
                 network=self.new_net)
@@ -238,10 +235,10 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
 
     def _hotplug_server(self):
         old_floating_ip, server = self.floating_ip_tuple
-        ip_address = old_floating_ip.floating_ip_address
+        ip_address = old_floating_ip['floating_ip_address']
         private_key = self._get_server_key(server)
-        ssh_client = self.get_remote_client(ip_address,
-                                            private_key=private_key)
+        ssh_client = self.get_remote_client(
+            ip_address, private_key=private_key)
         old_nic_list = self._get_server_nics(ssh_client)
         # get a port from a list of one item
         port_list = self._list_ports(device_id=server['id'])
@@ -249,11 +246,10 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
         old_port = port_list[0]
         interface = self.interface_client.create_interface(
             server_id=server['id'],
-            net_id=self.new_net.id)['interfaceAttachment']
-        self.addCleanup(self.network_client.wait_for_resource_deletion,
-                        'port',
-                        interface['port_id'], client=self.ports_client)
-        self.addCleanup(self.delete_wrapper,
+            net_id=self.new_net['id'])['interfaceAttachment']
+        self.addCleanup(self.ports_client.wait_for_resource_deletion,
+                        interface['port_id'])
+        self.addCleanup(test_utils.call_and_ignore_notfound_exc,
                         self.interface_client.delete_interface,
                         server['id'], interface['port_id'])
 
@@ -263,31 +259,33 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
                                   if port['id'] != old_port['id']]
             return len(self.new_port_list) == 1
 
-        if not test.call_until_true(check_ports, CONF.network.build_timeout,
-                                    CONF.network.build_interval):
+        if not test_utils.call_until_true(
+                check_ports, CONF.network.build_timeout,
+                CONF.network.build_interval):
             raise exceptions.TimeoutException(
                 "No new port attached to the server in time (%s sec)! "
                 "Old port: %s. Number of new ports: %d" % (
                     CONF.network.build_timeout, old_port,
                     len(self.new_port_list)))
-        new_port = net_resources.DeletablePort(ports_client=self.ports_client,
-                                               **self.new_port_list[0])
+        new_port = self.new_port_list[0]
 
         def check_new_nic():
             new_nic_list = self._get_server_nics(ssh_client)
             self.diff_list = [n for n in new_nic_list if n not in old_nic_list]
             return len(self.diff_list) == 1
 
-        if not test.call_until_true(check_new_nic, CONF.network.build_timeout,
-                                    CONF.network.build_interval):
+        if not test_utils.call_until_true(
+                check_new_nic, CONF.network.build_timeout,
+                CONF.network.build_interval):
             raise exceptions.TimeoutException("Interface not visible on the "
                                               "guest after %s sec"
                                               % CONF.network.build_timeout)
 
         num, new_nic = self.diff_list[0]
         ssh_client.assign_static_ip(nic=new_nic,
-                                    addr=new_port.fixed_ips[0]['ip_address'])
-        ssh_client.turn_nic_on(nic=new_nic)
+                                    addr=new_port['fixed_ips'][0][
+                                        'ip_address'])
+        ssh_client.set_nic_state(nic=new_nic)
 
     def _get_server_nics(self, ssh_client):
         reg = re.compile(r'(?P<num>\d+): (?P<nic_name>\w+):')
@@ -306,7 +304,7 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
         # get all network ports in the new network
         internal_ips = (p['fixed_ips'][0]['ip_address'] for p in
                         self._list_ports(tenant_id=server['tenant_id'],
-                                         network_id=network.id)
+                                         network_id=network['id'])
                         if p['device_owner'].startswith('network'))
 
         self._check_server_connectivity(floating_ip,
@@ -334,9 +332,10 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
 
     def _check_server_connectivity(self, floating_ip, address_list,
                                    should_connect=True):
-        ip_address = floating_ip.floating_ip_address
+        ip_address = floating_ip['floating_ip_address']
         private_key = self._get_server_key(self.floating_ip_tuple.server)
-        ssh_source = self._ssh_to_server(ip_address, private_key)
+        ssh_source = self.get_remote_client(
+            ip_address, private_key=private_key)
 
         for remote_ip in address_list:
             if should_connect:
@@ -407,9 +406,21 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
                                                msg="after re-associate "
                                                    "floating ip")
 
+    @test.idempotent_id('b158ea55-472e-4086-8fa9-c64ac0c6c1d0')
+    @testtools.skipUnless(test.is_extension_enabled('net-mtu', 'network'),
+                          'No way to calculate MTU for networks')
+    @test.services('compute', 'network')
+    def test_mtu_sized_frames(self):
+        """Validate that network MTU sized frames fit through."""
+        self._setup_network_and_servers()
+        self.check_public_network_connectivity(
+            should_connect=True, mtu=self.network['mtu'])
+
     @test.idempotent_id('1546850e-fbaa-42f5-8b5f-03d8a6a95f15')
-    @testtools.skipIf(CONF.baremetal.driver_enabled,
-                      'Baremetal relies on a shared physical network.')
+    @testtools.skipIf(CONF.network.shared_physical_network,
+                      'Connectivity can only be tested when in a '
+                      'multitenant network environment')
+    @decorators.skip_because(bug="1610994")
     @test.services('compute', 'network')
     def test_connectivity_between_vms_on_different_networks(self):
         """Test connectivity between VMs on different networks
@@ -445,11 +456,16 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
         self._check_network_internal_connectivity(network=self.network)
         self._check_network_external_connectivity()
         self._create_new_network(create_gateway=True)
-        name = data_utils.rand_name('server-smoke')
-        self._create_server(name, self.new_net)
+        self._create_server(self.new_net)
         self._check_network_internal_connectivity(network=self.new_net,
                                                   should_connect=False)
-        self.new_subnet.add_to_router(self.router.id)
+        router_id = self.router['id']
+        self.routers_client.add_router_interface(
+            router_id, subnet_id=self.new_subnet['id'])
+
+        self.addCleanup(test_utils.call_and_ignore_notfound_exc,
+                        self.routers_client.remove_router_interface,
+                        router_id, subnet_id=self.new_subnet['id'])
         self._check_network_internal_connectivity(network=self.new_net,
                                                   should_connect=True)
 
@@ -463,11 +479,11 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
     def test_hotplug_nic(self):
         """Test hotplug network interface
 
-        1. create a new network, with no gateway (to prevent overwriting VM's
-            gateway)
-        2. connect VM to new network
-        3. set static ip and bring new nic up
-        4. check VM can ping new network dhcp port
+        1. Create a network and a VM.
+        2. Check connectivity to the VM via a public network.
+        3. Create a new network, with no gateway.
+        4. Bring up a new interface
+        5. check the VM reach the new network
 
         """
         self._setup_network_and_servers()
@@ -477,9 +493,9 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
         self._check_network_internal_connectivity(network=self.new_net)
 
     @test.idempotent_id('04b9fe4e-85e8-4aea-b937-ea93885ac59f')
-    @testtools.skipIf(CONF.baremetal.driver_enabled,
-                      'Router state cannot be altered on a shared baremetal '
-                      'network')
+    @testtools.skipIf(CONF.network.shared_physical_network,
+                      'Router state can be altered only with multitenant '
+                      'networks capabilities')
     @test.services('compute', 'network')
     def test_update_router_admin_state(self):
         """Test to update admin state up of router
@@ -509,8 +525,8 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
             "admin_state_up of router to True")
 
     @test.idempotent_id('d8bb918e-e2df-48b2-97cd-b73c95450980')
-    @testtools.skipIf(CONF.baremetal.driver_enabled,
-                      'network isolation not available for baremetal nodes')
+    @testtools.skipIf(CONF.network.shared_physical_network,
+                      'network isolation not available')
     @testtools.skipUnless(CONF.scenario.dhcp_client,
                           "DHCP client is not available.")
     @test.services('compute', 'network')
@@ -551,9 +567,10 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
         self.check_public_network_connectivity(should_connect=True)
 
         floating_ip, server = self.floating_ip_tuple
-        ip_address = floating_ip.floating_ip_address
+        ip_address = floating_ip['floating_ip_address']
         private_key = self._get_server_key(server)
-        ssh_client = self._ssh_to_server(ip_address, private_key)
+        ssh_client = self.get_remote_client(
+            ip_address, private_key=private_key)
 
         dns_servers = [initial_dns_server]
         servers = ssh_client.get_dns_servers()
@@ -565,9 +582,11 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
                                  act_serv=servers,
                                  trgt_serv=dns_servers))
 
-        self.subnet.update(dns_nameservers=[alt_dns_server])
+        self.subnet = self.subnets_client.update_subnet(
+            self.subnet['id'], dns_nameservers=[alt_dns_server])['subnet']
+
         # asserts that Neutron DB has updated the nameservers
-        self.assertEqual([alt_dns_server], self.subnet.dns_nameservers,
+        self.assertEqual([alt_dns_server], self.subnet['dns_nameservers'],
                          "Failed to update subnet's nameservers")
 
         def check_new_dns_server():
@@ -582,16 +601,13 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
                 return False
             return True
 
-        self.assertTrue(test.call_until_true(check_new_dns_server,
-                                             renew_timeout,
-                                             renew_delay),
+        self.assertTrue(test_utils.call_until_true(check_new_dns_server,
+                                                   renew_timeout,
+                                                   renew_delay),
                         msg="DHCP renewal failed to fetch "
                             "new DNS nameservers")
 
     @test.idempotent_id('f5dfcc22-45fd-409f-954c-5bd500d7890b')
-    @testtools.skipIf(CONF.baremetal.driver_enabled,
-                      'admin_state of instance ports cannot be altered '
-                      'for baremetal nodes')
     @testtools.skipUnless(CONF.network_feature_enabled.port_admin_state_change,
                           "Changing a port's admin state is not supported "
                           "by the test environment")
@@ -599,34 +615,46 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
     def test_update_instance_port_admin_state(self):
         """Test to update admin_state_up attribute of instance port
 
-        1. Check public connectivity before updating
+        1. Check public and project connectivity before updating
                 admin_state_up attribute of instance port to False
-        2. Check public connectivity after updating
+        2. Check public and project connectivity after updating
                 admin_state_up attribute of instance port to False
-        3. Check public connectivity after updating
+        3. Check public and project connectivity after updating
                 admin_state_up attribute of instance port to True
         """
         self._setup_network_and_servers()
         floating_ip, server = self.floating_ip_tuple
         server_id = server['id']
         port_id = self._list_ports(device_id=server_id)[0]['id']
+        server_pip = server['addresses'][self.network['name']][0]['addr']
+
+        server2 = self._create_server(self.network)
+        server2_fip = self.create_floating_ip(server2)
+
+        private_key = self._get_server_key(server2)
+        ssh_client = self.get_remote_client(server2_fip['floating_ip_address'],
+                                            private_key=private_key)
+
         self.check_public_network_connectivity(
             should_connect=True, msg="before updating "
             "admin_state_up of instance port to False")
+        self._check_remote_connectivity(ssh_client, dest=server_pip,
+                                        should_succeed=True)
         self.ports_client.update_port(port_id, admin_state_up=False)
         self.check_public_network_connectivity(
             should_connect=False, msg="after updating "
             "admin_state_up of instance port to False",
             should_check_floating_ip_status=False)
+        self._check_remote_connectivity(ssh_client, dest=server_pip,
+                                        should_succeed=False)
         self.ports_client.update_port(port_id, admin_state_up=True)
         self.check_public_network_connectivity(
             should_connect=True, msg="after updating "
             "admin_state_up of instance port to True")
+        self._check_remote_connectivity(ssh_client, dest=server_pip,
+                                        should_succeed=True)
 
     @test.idempotent_id('759462e1-8535-46b0-ab3a-33aa45c55aaa')
-    @testtools.skipUnless(CONF.compute_feature_enabled.preserve_ports,
-                          'Preserving ports on instance delete may not be '
-                          'supported in the version of Nova being tested.')
     @test.services('compute', 'network')
     def test_preserve_preexisting_port(self):
         """Test preserve pre-existing port
@@ -636,6 +664,8 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
 
         Nova should unbind the port from the instance on delete if the port was
         not created by Nova as part of the boot request.
+
+        We should also be able to boot another server with the same port.
         """
         # Setup the network, create a port and boot the server from that port.
         self._setup_network_and_servers(boot_with_port=True)
@@ -664,6 +694,16 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
         self.assertEqual('', port['device_id'])
         self.assertEqual('', port['device_owner'])
 
+        # Boot another server with the same port to make sure nothing was
+        # left around that could cause issues.
+        server = self._create_server(self.network, port['id'])
+        port_list = self._list_ports(device_id=server['id'],
+                                     network_id=self.network['id'])
+        self.assertEqual(1, len(port_list),
+                         'There should only be one port created for '
+                         'server %s.' % server['id'])
+        self.assertEqual(port['id'], port_list[0]['id'])
+
     @test.requires_ext(service='network', extension='l3_agent_scheduler')
     @test.idempotent_id('2e788c46-fb3f-4ac9-8f82-0561555bea73')
     @test.services('compute', 'network')
@@ -681,20 +721,22 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
         # TODO(yfried): refactor this test to be used for other agents (dhcp)
         # as well
 
-        list_hosts = (self.admin_manager.network_client.
+        list_hosts = (self.admin_manager.routers_client.
                       list_l3_agents_hosting_router)
-        schedule_router = (self.admin_manager.network_client.
-                           add_router_to_l3_agent)
-        unschedule_router = (self.admin_manager.network_client.
-                             remove_router_from_l3_agent)
+        schedule_router = (self.admin_manager.network_agents_client.
+                           create_router_on_l3_agent)
+        unschedule_router = (self.admin_manager.network_agents_client.
+                             delete_router_from_l3_agent)
 
-        agent_list = set(a["id"] for a in
-                         self._list_agents(agent_type="L3 agent"))
+        agent_list_alive = set(a["id"] for a in
+                               self._list_agents(agent_type="L3 agent") if
+                               a["alive"] is True)
         self._setup_network_and_servers()
 
         # NOTE(kevinbenton): we have to use the admin credentials to check
-        # for the distributed flag because self.router only has a tenant view.
-        admin = self.admin_manager.network_client.show_router(self.router.id)
+        # for the distributed flag because self.router only has a project view.
+        admin = self.admin_manager.routers_client.show_router(
+            self.router['id'])
         if admin['router'].get('distributed', False):
             msg = "Rescheduling test does not apply to distributed routers."
             raise self.skipException(msg)
@@ -703,33 +745,32 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
 
         # remove resource from agents
         hosting_agents = set(a["id"] for a in
-                             list_hosts(self.router.id)['agents'])
-        no_migration = agent_list == hosting_agents
+                             list_hosts(self.router['id'])['agents'])
+        no_migration = agent_list_alive == hosting_agents
         LOG.info("Router will be assigned to {mig} hosting agent".
                  format(mig="the same" if no_migration else "a new"))
 
         for hosting_agent in hosting_agents:
-            unschedule_router(hosting_agent, self.router.id)
+            unschedule_router(hosting_agent, self.router['id'])
             self.assertNotIn(hosting_agent,
                              [a["id"] for a in
-                              list_hosts(self.router.id)['agents']],
+                              list_hosts(self.router['id'])['agents']],
                              'unscheduling router failed')
 
         # verify resource is un-functional
         self.check_public_network_connectivity(
             should_connect=False,
             msg='after router unscheduling',
-            should_check_floating_ip_status=False
         )
 
         # schedule resource to new agent
         target_agent = list(hosting_agents if no_migration else
-                            agent_list - hosting_agents)[0]
+                            agent_list_alive - hosting_agents)[0]
         schedule_router(target_agent,
-                        self.router['id'])
+                        router_id=self.router['id'])
         self.assertEqual(
             target_agent,
-            list_hosts(self.router.id)['agents'][0]['id'],
+            list_hosts(self.router['id'])['agents'][0]['id'],
             "Router failed to reschedule. Hosting agent doesn't match "
             "target agent")
 
@@ -737,3 +778,58 @@ class TestNetworkBasicOps(manager.NetworkScenarioTest):
         self.check_public_network_connectivity(
             should_connect=True,
             msg='After router rescheduling')
+
+    @test.requires_ext(service='network', extension='port-security')
+    @testtools.skipUnless(CONF.compute_feature_enabled.interface_attach,
+                          'NIC hotplug not available')
+    @test.idempotent_id('7c0bb1a2-d053-49a4-98f9-ca1a1d849f63')
+    @test.services('compute', 'network')
+    def test_port_security_macspoofing_port(self):
+        """Tests port_security extension enforces mac spoofing
+
+        Neutron security groups always apply anti-spoof rules on the VMs. This
+        allows traffic to originate and terminate at the VM as expected, but
+        prevents traffic to pass through the VM. Anti-spoof rules are not
+        required in cases where the VM routes traffic through it.
+
+        The test steps are :
+        1. Create a new network.
+        2. Connect (hotplug) the VM to a new network.
+        3. Check the VM can ping a server on the new network ("peer")
+        4. Spoof the mac address of the new VM interface.
+        5. Check the Security Group enforces mac spoofing and blocks pings via
+           spoofed interface (VM cannot ping the peer).
+        6. Disable port-security of the spoofed port- set the flag to false.
+        7. Retest 3rd step and check that the Security Group allows pings via
+        the spoofed interface.
+        """
+
+        spoof_mac = "00:00:00:00:00:01"
+
+        # Create server
+        self._setup_network_and_servers()
+        self.check_public_network_connectivity(should_connect=True)
+        self._create_new_network()
+        self._hotplug_server()
+        fip, server = self.floating_ip_tuple
+        new_ports = self._list_ports(device_id=server["id"],
+                                     network_id=self.new_net["id"])
+        spoof_port = new_ports[0]
+        private_key = self._get_server_key(server)
+        ssh_client = self.get_remote_client(fip['floating_ip_address'],
+                                            private_key=private_key)
+        spoof_nic = ssh_client.get_nic_name_by_mac(spoof_port["mac_address"])
+        peer = self._create_server(self.new_net)
+        peer_address = peer['addresses'][self.new_net['name']][0]['addr']
+        self._check_remote_connectivity(ssh_client, dest=peer_address,
+                                        nic=spoof_nic, should_succeed=True)
+        ssh_client.set_mac_address(spoof_nic, spoof_mac)
+        new_mac = ssh_client.get_mac_address(nic=spoof_nic)
+        self.assertEqual(spoof_mac, new_mac)
+        self._check_remote_connectivity(ssh_client, dest=peer_address,
+                                        nic=spoof_nic, should_succeed=False)
+        self.ports_client.update_port(spoof_port["id"],
+                                      port_security_enabled=False,
+                                      security_groups=[])
+        self._check_remote_connectivity(ssh_client, dest=peer_address,
+                                        nic=spoof_nic, should_succeed=True)

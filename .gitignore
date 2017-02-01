@@ -1,6 +1,8 @@
 AUTHORS
 ChangeLog
 *.pyc
+__pycache__/
+etc/accounts.yaml
 etc/tempest.conf
 etc/tempest.conf.sample
 etc/logging.conf
@@ -16,7 +18,14 @@ include/swift_objects/swift_large
 dist
 build
 .testrepository
+.idea
+.project
+.pydevproject
 .coverage*
 !.coveragerc
 cover/
 doc/source/_static/tempest.conf.sample
+doc/source/plugin-registry.rst
+
+# Files created by releasenotes build
+releasenotes/build

@@ -13,14 +13,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import testtools
-
 from tempest.api.compute import base
 from tempest.common.utils import data_utils
-from tempest import config
+from tempest.lib import decorators
 from tempest import test
-
-CONF = config.CONF
 
 
 class SecurityGroupsTestAdminJSON(base.BaseV2ComputeAdminTest):
@@ -28,7 +24,7 @@ class SecurityGroupsTestAdminJSON(base.BaseV2ComputeAdminTest):
     @classmethod
     def setup_clients(cls):
         super(SecurityGroupsTestAdminJSON, cls).setup_clients()
-        cls.adm_client = cls.os_adm.security_groups_client
+        cls.adm_client = cls.os_adm.compute_security_groups_client
         cls.client = cls.security_groups_client
 
     def _delete_security_group(self, securitygroup_id, admin=True):
@@ -37,17 +33,14 @@ class SecurityGroupsTestAdminJSON(base.BaseV2ComputeAdminTest):
         else:
             self.client.delete_security_group(securitygroup_id)
 
-    @test.idempotent_id('49667619-5af9-4c63-ab5d-2cfdd1c8f7f1')
-    @testtools.skipIf(CONF.service_available.neutron,
-                      "Skipped because neutron does not support all_tenants "
-                      "search filter.")
+    @decorators.idempotent_id('49667619-5af9-4c63-ab5d-2cfdd1c8f7f1')
     @test.services('network')
     def test_list_security_groups_list_all_tenants_filter(self):
         # Admin can list security groups of all tenants
         # List of all security groups created
         security_group_list = []
         # Create two security groups for a non-admin tenant
-        for i in range(2):
+        for _ in range(2):
             name = data_utils.rand_name('securitygroup')
             description = data_utils.rand_name('description')
             securitygroup = self.client.create_security_group(
@@ -58,7 +51,7 @@ class SecurityGroupsTestAdminJSON(base.BaseV2ComputeAdminTest):
 
         client_tenant_id = securitygroup['tenant_id']
         # Create two security groups for admin tenant
-        for i in range(2):
+        for _ in range(2):
             name = data_utils.rand_name('securitygroup')
             description = data_utils.rand_name('description')
             adm_securitygroup = self.adm_client.create_security_group(
@@ -70,7 +63,7 @@ class SecurityGroupsTestAdminJSON(base.BaseV2ComputeAdminTest):
         # Fetch all security groups based on 'all_tenants' search filter
         fetched_list = self.adm_client.list_security_groups(
             all_tenants='true')['security_groups']
-        sec_group_id_list = map(lambda sg: sg['id'], fetched_list)
+        sec_group_id_list = [sg['id'] for sg in fetched_list]
         # Now check if all created Security Groups are present in fetched list
         for sec_group in security_group_list:
             self.assertIn(sec_group['id'], sec_group_id_list)

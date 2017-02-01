@@ -14,11 +14,13 @@
 import time
 
 from oslo_log import log as logging
-from tempest_lib.common.utils import misc as misc_utils
-from tempest_lib import exceptions as lib_exc
 
+from tempest.common import image as common_image
 from tempest import config
 from tempest import exceptions
+from tempest.lib.common.utils import test_utils
+from tempest.lib import exceptions as lib_exc
+from tempest.lib.services.image.v1 import images_client as images_v1_client
 
 CONF = config.CONF
 LOG = logging.getLogger(__name__)
@@ -51,9 +53,7 @@ def wait_for_server_status(client, server_id, status, ready_wait=True,
                     return
                 # NOTE(afazekas): The instance is in "ready for action state"
                 # when no task in progress
-                # NOTE(afazekas): Converted to string because of the XML
-                # responses
-                if str(task_state) == "None":
+                if task_state is None:
                     # without state api extension 3 sec usually enough
                     time.sleep(CONF.compute.ready_wait)
                     return
@@ -89,10 +89,10 @@ def wait_for_server_status(client, server_id, status, ready_wait=True,
                         'timeout': timeout})
             message += ' Current status: %s.' % server_status
             message += ' Current task state: %s.' % task_state
-            caller = misc_utils.find_test_caller()
+            caller = test_utils.find_test_caller()
             if caller:
                 message = '(%s) %s' % (caller, message)
-            raise exceptions.TimeoutException(message)
+            raise lib_exc.TimeoutException(message)
         old_status = server_status
         old_task_state = task_state
 
@@ -111,7 +111,7 @@ def wait_for_server_termination(client, server_id, ignore_error=False):
             raise exceptions.BuildErrorException(server_id=server_id)
 
         if int(time.time()) - start_time >= client.build_timeout:
-            raise exceptions.TimeoutException
+            raise lib_exc.TimeoutException
 
         time.sleep(client.build_interval)
 
@@ -122,42 +122,48 @@ def wait_for_image_status(client, image_id, status):
     The client should have a show_image(image_id) method to get the image.
     The client should also have build_interval and build_timeout attributes.
     """
-    image = client.show_image(image_id)
-    # Compute image client return response wrapped in 'image' element
-    # which is not case with glance image client.
-    if 'image' in image:
-        image = image['image']
-    start = int(time.time())
+    if isinstance(client, images_v1_client.ImagesClient):
+        # The 'check_image' method is used here because the show_image method
+        # returns image details plus the image itself which is very expensive.
+        # The 'check_image' method returns just image details.
+        def _show_image_v1(image_id):
+            resp = client.check_image(image_id)
+            return common_image.get_image_meta_from_headers(resp)
 
-    while image['status'] != status:
-        time.sleep(client.build_interval)
-        image = client.show_image(image_id)
-        # Compute image client return response wrapped in 'image' element
-        # which is not case with glance image client.
+        show_image = _show_image_v1
+    else:
+        show_image = client.show_image
+
+    current_status = 'An unknown status'
+    start = int(time.time())
+    while int(time.time()) - start < client.build_timeout:
+        image = show_image(image_id)
+        # Compute image client returns response wrapped in 'image' element
+        # which is not the case with Glance image client.
         if 'image' in image:
             image = image['image']
-        status_curr = image['status']
-        if status_curr == 'ERROR':
+
+        current_status = image['status']
+        if current_status == status:
+            return
+        if current_status.lower() == 'killed':
+            raise exceptions.ImageKilledException(image_id=image_id,
+                                                  status=status)
+        if current_status.lower() == 'error':
             raise exceptions.AddImageException(image_id=image_id)
 
-        # check the status again to avoid a false negative where we hit
-        # the timeout at the same time that the image reached the expected
-        # status
-        if status_curr == status:
-            return
+        time.sleep(client.build_interval)
 
-        if int(time.time()) - start >= client.build_timeout:
-            message = ('Image %(image_id)s failed to reach %(status)s state'
-                       '(current state %(status_curr)s) '
-                       'within the required time (%(timeout)s s).' %
-                       {'image_id': image_id,
-                        'status': status,
-                        'status_curr': status_curr,
-                        'timeout': client.build_timeout})
-            caller = misc_utils.find_test_caller()
-            if caller:
-                message = '(%s) %s' % (caller, message)
-            raise exceptions.TimeoutException(message)
+    message = ('Image %(image_id)s failed to reach %(status)s state '
+               '(current state %(current_status)s) within the required '
+               'time (%(timeout)s s).' % {'image_id': image_id,
+                                          'status': status,
+                                          'current_status': current_status,
+                                          'timeout': client.build_timeout})
+    caller = test_utils.find_test_caller()
+    if caller:
+        message = '(%s) %s' % (caller, message)
+    raise lib_exc.TimeoutException(message)
 
 
 def wait_for_volume_status(client, volume_id, status):
@@ -170,7 +176,7 @@ def wait_for_volume_status(client, volume_id, status):
         time.sleep(client.build_interval)
         body = client.show_volume(volume_id)['volume']
         volume_status = body['status']
-        if volume_status == 'error':
+        if volume_status == 'error' and status != 'error':
             raise exceptions.VolumeBuildErrorException(volume_id=volume_id)
         if volume_status == 'error_restoring':
             raise exceptions.VolumeRestoreErrorException(volume_id=volume_id)
@@ -179,6 +185,25 @@ def wait_for_volume_status(client, volume_id, status):
             message = ('Volume %s failed to reach %s status (current %s) '
                        'within the required time (%s s).' %
                        (volume_id, status, volume_status,
+                        client.build_timeout))
+            raise lib_exc.TimeoutException(message)
+
+
+def wait_for_volume_retype(client, volume_id, new_volume_type):
+    """Waits for a Volume to have a new volume type."""
+    body = client.show_volume(volume_id)['volume']
+    current_volume_type = body['volume_type']
+    start = int(time.time())
+
+    while current_volume_type != new_volume_type:
+        time.sleep(client.build_interval)
+        body = client.show_volume(volume_id)['volume']
+        current_volume_type = body['volume_type']
+
+        if int(time.time()) - start >= client.build_timeout:
+            message = ('Volume %s failed to reach %s volume type (current %s) '
+                       'within the required time (%s s).' %
+                       (volume_id, new_volume_type, current_volume_type,
                         client.build_timeout))
             raise exceptions.TimeoutException(message)
 
@@ -201,33 +226,82 @@ def wait_for_snapshot_status(client, snapshot_id, status):
                        'within the required time (%s s).' %
                        (snapshot_id, status, snapshot_status,
                         client.build_timeout))
-            raise exceptions.TimeoutException(message)
+            raise lib_exc.TimeoutException(message)
 
 
-def wait_for_bm_node_status(client, node_id, attr, status):
-    """Waits for a baremetal node attribute to reach given status.
-
-    The client should have a show_node(node_uuid) method to get the node.
-    """
-    _, node = client.show_node(node_id)
+def wait_for_backup_status(client, backup_id, status):
+    """Waits for a Backup to reach a given status."""
+    body = client.show_backup(backup_id)['backup']
+    backup_status = body['status']
     start = int(time.time())
 
-    while node[attr] != status:
+    while backup_status != status:
         time.sleep(client.build_interval)
-        _, node = client.show_node(node_id)
-        status_curr = node[attr]
-        if status_curr == status:
-            return
+        body = client.show_backup(backup_id)['backup']
+        backup_status = body['status']
+        if backup_status == 'error' and backup_status != status:
+            raise lib_exc.VolumeBackupException(backup_id=backup_id)
 
         if int(time.time()) - start >= client.build_timeout:
-            message = ('Node %(node_id)s failed to reach %(attr)s=%(status)s '
-                       'within the required time (%(timeout)s s).' %
-                       {'node_id': node_id,
-                        'attr': attr,
-                        'status': status,
-                        'timeout': client.build_timeout})
-            message += ' Current state of %s: %s.' % (attr, status_curr)
-            caller = misc_utils.find_test_caller()
-            if caller:
-                message = '(%s) %s' % (caller, message)
-            raise exceptions.TimeoutException(message)
+            message = ('Volume backup %s failed to reach %s status '
+                       '(current %s) within the required time (%s s).' %
+                       (backup_id, status, backup_status,
+                        client.build_timeout))
+            raise lib_exc.TimeoutException(message)
+
+
+def wait_for_qos_operations(client, qos_id, operation, args=None):
+    """Waits for a qos operations to be completed.
+
+    NOTE : operation value is required for  wait_for_qos_operations()
+    operation = 'qos-key' / 'disassociate' / 'disassociate-all'
+    args = keys[] when operation = 'qos-key'
+    args = volume-type-id disassociated when operation = 'disassociate'
+    args = None when operation = 'disassociate-all'
+    """
+    start_time = int(time.time())
+    while True:
+        if operation == 'qos-key-unset':
+            body = client.show_qos(qos_id)['qos_specs']
+            if not any(key in body['specs'] for key in args):
+                return
+        elif operation == 'disassociate':
+            body = client.show_association_qos(qos_id)['qos_associations']
+            if not any(args in body[i]['id'] for i in range(0, len(body))):
+                return
+        elif operation == 'disassociate-all':
+            body = client.show_association_qos(qos_id)['qos_associations']
+            if not body:
+                return
+        else:
+            msg = (" operation value is either not defined or incorrect.")
+            raise lib_exc.UnprocessableEntity(msg)
+
+        if int(time.time()) - start_time >= client.build_timeout:
+            raise lib_exc.TimeoutException
+        time.sleep(client.build_interval)
+
+
+def wait_for_interface_status(client, server, port_id, status):
+    """Waits for an interface to reach a given status."""
+    body = (client.show_interface(server, port_id)
+            ['interfaceAttachment'])
+    interface_status = body['port_state']
+    start = int(time.time())
+
+    while(interface_status != status):
+        time.sleep(client.build_interval)
+        body = (client.show_interface(server, port_id)
+                ['interfaceAttachment'])
+        interface_status = body['port_state']
+
+        timed_out = int(time.time()) - start >= client.build_timeout
+
+        if interface_status != status and timed_out:
+            message = ('Interface %s failed to reach %s status '
+                       '(current %s) within the required time (%s s).' %
+                       (port_id, status, interface_status,
+                        client.build_timeout))
+            raise lib_exc.TimeoutException(message)
+
+    return body

@@ -10,16 +10,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-
-import logging
-
 import netaddr
+from oslo_log import log as logging
 
 from tempest.api.orchestration import base
-from tempest.common import credentials_factory as credentials
 from tempest.common.utils import data_utils
 from tempest import config
-from tempest import exceptions
+from tempest.lib import exceptions
 from tempest import test
 
 CONF = config.CONF
@@ -37,15 +34,15 @@ class NeutronResourcesTestJSON(base.BaseOrchestrationTest):
 
     @classmethod
     def setup_credentials(cls):
+        cls.set_network_resources()
         super(NeutronResourcesTestJSON, cls).setup_credentials()
-        cls.os = credentials.ConfiguredUserManager()
 
     @classmethod
     def setup_clients(cls):
         super(NeutronResourcesTestJSON, cls).setup_clients()
-        cls.network_client = cls.os.network_client
         cls.subnets_client = cls.os.subnets_client
         cls.ports_client = cls.os.ports_client
+        cls.routers_client = cls.os.routers_client
 
     @classmethod
     def resource_setup(cls):
@@ -57,8 +54,8 @@ class NeutronResourcesTestJSON(base.BaseOrchestrationTest):
                             cls._create_keypair()['name'])
         cls.external_network_id = CONF.network.public_network_id
 
-        tenant_cidr = netaddr.IPNetwork(CONF.network.tenant_network_cidr)
-        mask_bits = CONF.network.tenant_network_mask_bits
+        tenant_cidr = netaddr.IPNetwork(CONF.network.project_network_cidr)
+        mask_bits = CONF.network.project_network_mask_bits
         cls.subnet_cidr = tenant_cidr.subnet(mask_bits).next()
 
         # create the stack
@@ -79,7 +76,7 @@ class NeutronResourcesTestJSON(base.BaseOrchestrationTest):
             cls.client.wait_for_stack_status(cls.stack_id, 'CREATE_COMPLETE')
             resources = (cls.client.list_resources(cls.stack_identifier)
                          ['resources'])
-        except exceptions.TimeoutException as e:
+        except exceptions.TimeoutException:
             if CONF.compute_feature_enabled.console_output:
                 # attempt to log the server console to help with debugging
                 # the cause of the server not signalling the waitcondition
@@ -89,9 +86,9 @@ class NeutronResourcesTestJSON(base.BaseOrchestrationTest):
                 server_id = body['physical_resource_id']
                 LOG.debug('Console output for %s', server_id)
                 output = cls.servers_client.get_console_output(
-                    server_id, None)['output']
+                    server_id)['output']
                 LOG.debug(output)
-            raise e
+            raise
 
         cls.test_resources = {}
         for resource in resources:
@@ -150,7 +147,7 @@ class NeutronResourcesTestJSON(base.BaseOrchestrationTest):
     def test_created_router(self):
         """Verifies created router."""
         router_id = self.test_resources.get('Router')['physical_resource_id']
-        body = self.network_client.show_router(router_id)
+        body = self.routers_client.show_router(router_id)
         router = body['router']
         self.assertEqual(self.neutron_basic_template['resources'][
             'Router']['properties']['name'], router['name'])

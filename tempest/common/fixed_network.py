@@ -13,9 +13,8 @@
 import copy
 from oslo_log import log as logging
 
-from tempest_lib.common.utils import misc as misc_utils
-
 from tempest import exceptions
+from tempest.lib.common.utils import test_utils
 
 LOG = logging.getLogger(__name__)
 
@@ -32,7 +31,7 @@ def get_network_from_name(name, compute_networks_client):
         list returns a 404, there are no found networks, or the found network
         is invalid
     """
-    caller = misc_utils.find_test_caller()
+    caller = test_utils.find_test_caller()
 
     if not name:
         raise exceptions.InvalidTestResource(type='network', name=name)
@@ -49,13 +48,13 @@ def get_network_from_name(name, compute_networks_client):
                    name, networks))
         if caller:
             msg = '(%s) %s' % (caller, msg)
-        LOG.warn(msg)
+        LOG.warning(msg)
         raise exceptions.InvalidTestResource(type='network', name=name)
     else:
         msg = "Network with name: %s not found" % name
         if caller:
             msg = '(%s) %s' % (caller, msg)
-        LOG.warn(msg)
+        LOG.warning(msg)
         raise exceptions.InvalidTestResource(type='network', name=name)
     # To be consistent between neutron and nova network always use name even
     # if label is used in the api response. If neither is present than then
@@ -65,7 +64,7 @@ def get_network_from_name(name, compute_networks_client):
         msg = "Network found from list doesn't contain a valid name or label"
         if caller:
             msg = '(%s) %s' % (caller, msg)
-        LOG.warn(msg)
+        LOG.warning(msg)
         raise exceptions.InvalidTestResource(type='network', name=name)
     network['name'] = name
     return network
@@ -83,9 +82,9 @@ def get_tenant_network(creds_provider, compute_networks_client,
            is the network to be used, and it's not visible to the tenant
     :param shared_network_name: name of the shared network to be used if no
            tenant network is available in the creds provider
-    :return a dict with 'id' and 'name' of the network
+    :returns: a dict with 'id' and 'name' of the network
     """
-    caller = misc_utils.find_test_caller()
+    caller = test_utils.find_test_caller()
     net_creds = creds_provider.get_primary_creds()
     network = getattr(net_creds, 'network', None)
     if not network or not network.get('name'):
@@ -122,6 +121,6 @@ def set_networks_kwarg(network, kwargs=None):
         if 'id' in network.keys():
             params.update({"networks": [{'uuid': network['id']}]})
         else:
-            LOG.warn('The provided network dict: %s was invalid and did not '
-                     ' contain an id' % network)
+            LOG.warning('The provided network dict: %s was invalid and did '
+                        'not contain an id', network)
     return params

@@ -14,6 +14,7 @@
 #    under the License.
 
 import netaddr
+import six
 
 from tempest.api.network import base
 from tempest import config
@@ -90,7 +91,8 @@ class AllowedAddressPairTestJSON(base.BaseNetworkTest):
         body = self.ports_client.update_port(
             port_id, allowed_address_pairs=allowed_address_pairs)
         allowed_address_pair = body['port']['allowed_address_pairs']
-        self.assertEqual(allowed_address_pair, allowed_address_pairs)
+        six.assertCountEqual(self, allowed_address_pair,
+                             allowed_address_pairs)
 
     @test.idempotent_id('9599b337-272c-47fd-b3cf-509414414ac4')
     def test_update_port_with_address_pair(self):
@@ -100,7 +102,7 @@ class AllowedAddressPairTestJSON(base.BaseNetworkTest):
     @test.idempotent_id('4d6d178f-34f6-4bff-a01c-0a2f8fe909e4')
     def test_update_port_with_cidr_address_pair(self):
         # Update allowed address pair with cidr
-        cidr = str(netaddr.IPNetwork(CONF.network.tenant_network_cidr))
+        cidr = str(netaddr.IPNetwork(CONF.network.project_network_cidr))
         self._update_port_with_address(cidr)
 
     @test.idempotent_id('b3f20091-6cd5-472b-8487-3516137df933')

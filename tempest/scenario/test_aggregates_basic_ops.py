@@ -13,15 +13,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_log import log as logging
-
 from tempest.common import tempest_fixtures as fixtures
 from tempest.common.utils import data_utils
 from tempest.scenario import manager
 from tempest import test
-
-
-LOG = logging.getLogger(__name__)
 
 
 class TestAggregatesBasicOps(manager.ScenarioTest):
@@ -41,26 +36,23 @@ class TestAggregatesBasicOps(manager.ScenarioTest):
         super(TestAggregatesBasicOps, cls).setup_clients()
         # Use admin client by default
         cls.manager = cls.admin_manager
-        super(TestAggregatesBasicOps, cls).resource_setup()
         cls.aggregates_client = cls.manager.aggregates_client
         cls.hosts_client = cls.manager.hosts_client
 
     def _create_aggregate(self, **kwargs):
         aggregate = (self.aggregates_client.create_aggregate(**kwargs)
                      ['aggregate'])
-        self.addCleanup(self._delete_aggregate, aggregate)
+        self.addCleanup(self.aggregates_client.delete_aggregate,
+                        aggregate['id'])
         aggregate_name = kwargs['name']
         availability_zone = kwargs['availability_zone']
         self.assertEqual(aggregate['name'], aggregate_name)
         self.assertEqual(aggregate['availability_zone'], availability_zone)
         return aggregate
 
-    def _delete_aggregate(self, aggregate):
-        self.aggregates_client.delete_aggregate(aggregate['id'])
-
     def _get_host_name(self):
         hosts = self.hosts_client.list_hosts()['hosts']
-        self.assertTrue(len(hosts) >= 1)
+        self.assertGreaterEqual(len(hosts), 1)
         computes = [x for x in hosts if x['service'] == 'compute']
         return computes[0]['host_name']
 
@@ -81,7 +73,7 @@ class TestAggregatesBasicOps(manager.ScenarioTest):
         self.assertEqual(aggregate_name, aggregate['name'])
         self.assertEqual(azone, aggregate['availability_zone'])
         self.assertEqual(hosts, aggregate['hosts'])
-        for meta_key in metadata.keys():
+        for meta_key in metadata:
             self.assertIn(meta_key, aggregate['metadata'])
             self.assertEqual(metadata[meta_key],
                              aggregate['metadata'][meta_key])

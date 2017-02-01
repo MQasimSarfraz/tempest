@@ -16,8 +16,12 @@ Tempest Specific Commandments
 - [T107] Check that a service tag isn't in the module path
 - [T108] Check no hyphen at the end of rand_name() argument
 - [T109] Cannot use testtools.skip decorator; instead use
-         decorators.skip_because from tempest-lib
+         decorators.skip_because from tempest.lib
 - [T110] Check that service client names of GET should be consistent
+- [T111] Check that service client names of DELETE should be consistent
+- [T112] Check that tempest.lib should not import local tempest code
+- [T113] Check that tests use data_utils.rand_uuid() instead of uuid.uuid4()
+- [T114] Check that tempest.lib does not use tempest config
 - [N322] Method's default argument shouldn't be mutable
 
 Test Data/Configuration
@@ -129,6 +133,7 @@ overwritten by subclasses (enforced via hacking rule T105).
 
 Set-up is split in a series of steps (setup stages), which can be overwritten
 by test classes. Set-up stages are:
+
 - `skip_checks`
 - `setup_credentials`
 - `setup_clients`
@@ -137,6 +142,7 @@ by test classes. Set-up stages are:
 Tear-down is also split in a series of steps (teardown stages), which are
 stacked for execution only if the corresponding setup stage had been
 reached during the setup phase. Tear-down stages are:
+
 - `clear_credentials` (defined in the base test class)
 - `resource_cleanup`
 
@@ -154,37 +160,42 @@ not there even if the cloud was configured with it.
 
 Negative Tests
 --------------
-Newly added negative tests should use the negative test framework. First step
-is to create an interface description in a python file under
-`tempest/api_schema/request/`. These descriptions consists of two important
-sections for the test (one of those is mandatory):
+Error handling is an important aspect of API design and usage. Negative
+tests are a way to ensure that an application can gracefully handle
+invalid or unexpected input. However, as a black box integration test
+suite, Tempest is not suitable for handling all negative test cases, as
+the wide variety and complexity of negative tests can lead to long test
+runs and knowledge of internal implementation details. The bulk of
+negative testing should be handled with project function tests.
+All negative tests should be based on `API-WG guideline`_ . Such negative
+tests can block any changes from accurate failure code to invalid one.
 
- - A resource (part of the URL of the request): Resources needed for a test
-   must be created in `setUpClass` and registered with `set_resource` e.g.:
-   `cls.set_resource("server", server['id'])`
+.. _API-WG guideline: https://github.com/openstack/api-wg/blob/master/guidelines/http.rst#failure-code-clarifications
 
- - A json schema: defines properties for a request.
+If facing some gray area which is not clarified on the above guideline, propose
+a new guideline to the API-WG. With a proposal to the API-WG we will be able to
+build a consensus across all OpenStack projects and improve the quality and
+consistency of all the APIs.
 
-After that a test class must be added to automatically generate test scenarios
-out of the given interface description::
+In addition, we have some guidelines for additional negative tests.
 
-    load_tests = test.NegativeAutoTest.load_tests
+- About BadRequest(HTTP400) case: We can add a single negative tests of
+  BadRequest for each resource and method(POST, PUT).
+  Please don't implement more negative tests on the same combination of
+  resource and method even if API request parameters are different from
+  the existing test.
+- About NotFound(HTTP404) case: We can add a single negative tests of
+  NotFound for each resource and method(GET, PUT, DELETE, HEAD).
+  Please don't implement more negative tests on the same combination
+  of resource and method.
 
-    @test.SimpleNegativeAutoTest
-    class SampleTestNegativeTestJSON(<your base class>, test.NegativeAutoTest):
-        _service = 'compute'
-        _schema = <your schema file>
-
-The class decorator `SimpleNegativeAutoTest` will automatically generate test
-cases out of the given schema in the attribute `_schema`.
-
-All negative tests should be added into a separate negative test file.
-If such a file doesn't exist for the particular resource being tested a new
-test file should be added.
+The above guidelines don't cover all cases and we will grow these guidelines
+organically over time. Patches outside of the above guidelines are left up to
+the reviewers' discretion and if we face some conflicts between reviewers, we
+will expand the guideline based on our discussion and experience.
 
 Test skips because of Known Bugs
 --------------------------------
-
 If a test is broken because of a bug it is appropriate to skip the test until
 bug has been fixed. You should use the skip_because decorator so that
 Tempest's skip tracking tool can watch the bug status.
@@ -212,9 +223,9 @@ conditions between tests outside the same class. But there are still a few of
 things to watch out for to try to avoid issues when running your tests in
 parallel.
 
-- Resources outside of a tenant scope still have the potential to conflict. This
+- Resources outside of a project scope still have the potential to conflict. This
   is a larger concern for the admin tests since most resources and actions that
-  require admin privileges are outside of tenants.
+  require admin privileges are outside of projects.
 
 - Races between methods in the same class are not a problem because
   parallelization in tempest is at the test class level, but if there is a json
@@ -228,29 +239,6 @@ parallel.
 - If the execution of a set of tests is required to be serialized then locking
   can be used to perform this. See AggregatesAdminTest in
   tempest.api.compute.admin for an example of using locking.
-
-Stress Tests in Tempest
------------------------
-Any tempest test case can be flagged as a stress test. With this flag it will
-be automatically discovery and used in the stress test runs. The stress test
-framework itself is a facility to spawn and control worker processes in order
-to find race conditions (see ``tempest/stress/`` for more information). Please
-note that these stress tests can't be used for benchmarking purposes since they
-don't measure any performance characteristics.
-
-Example::
-
-  @stresstest(class_setup_per='process')
-  def test_this_and_that(self):
-    ...
-
-This will flag the test ``test_this_and_that`` as a stress test. The parameter
-``class_setup_per`` gives control when the setUpClass function should be called.
-
-Good candidates for stress tests are:
-
-- Scenario tests
-- API tests that have a wide focus
 
 Sample Configuration File
 -------------------------
@@ -330,24 +318,25 @@ format of the metadata looks like::
         # The created server should be in the detailed list of all servers
         ...
 
-Tempest includes a ``check_uuid.py`` tool that will test for the existence
-and uniqueness of idempotent_id metadata for every test. By default the
-tool runs against the Tempest package by calling::
+Tempest.lib includes a ``check-uuid`` tool that will test for the existence
+and uniqueness of idempotent_id metadata for every test. If you have
+tempest installed you run the tool against Tempest by calling from the
+tempest repo::
 
-    python check_uuid.py
+    check-uuid
 
 It can be invoked against any test suite by passing a package name::
 
-    python check_uuid.py --package <package_name>
+    check-uuid --package <package_name>
 
 Tests without an ``idempotent_id`` can be automatically fixed by running
 the command with the ``--fix`` flag, which will modify the source package
 by inserting randomly generated uuids for every test that does not have
 one::
 
-    python check_uuid.py --fix
+    check-uuid --fix
 
-The ``check_uuid.py`` tool is used as part of the tempest gate job
+The ``check-uuid`` tool is used as part of the tempest gate job
 to ensure that all tests have an ``idempotent_id`` decorator.
 
 Branchless Tempest Considerations

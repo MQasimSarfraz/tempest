@@ -16,13 +16,13 @@
 import time
 
 from six.moves.urllib import parse as urlparse
-from tempest_lib import decorators
 import testtools
 
 
 from tempest.api.object_storage import base
 from tempest.common.utils import data_utils
 from tempest import config
+from tempest.lib import decorators
 from tempest import test
 
 CONF = config.CONF
@@ -80,7 +80,7 @@ class ContainerSyncTest(base.BaseObjectTest):
     @classmethod
     def resource_cleanup(cls):
         for client in cls.clients.values():
-            cls.delete_containers(cls.containers, client[0], client[1])
+            cls.delete_containers(client[0], client[1])
         super(ContainerSyncTest, cls).resource_cleanup()
 
     def _test_container_synchronization(self, make_headers):
@@ -96,7 +96,7 @@ class ContainerSyncTest(base.BaseObjectTest):
                 cont_client[0].put(str(cont[0]), body=None, headers=headers)
             # create object in container
             object_name = data_utils.rand_name(name='TestSyncObject')
-            data = object_name[::-1]  # data_utils.arbitrary_string()
+            data = object_name[::-1].encode()  # Raw data, we need bytes
             resp, _ = obj_client[0].create_object(cont[0], object_name, data)
             self.objects.append(object_name)
 
@@ -127,7 +127,7 @@ class ContainerSyncTest(base.BaseObjectTest):
         for obj_client, cont in obj_clients:
             for obj_name in object_lists[0]:
                 resp, object_content = obj_client.get_object(cont, obj_name)
-                self.assertEqual(object_content, obj_name[::-1])
+                self.assertEqual(object_content, obj_name[::-1].encode())
 
     @test.attr(type='slow')
     @decorators.skip_because(bug='1317133')

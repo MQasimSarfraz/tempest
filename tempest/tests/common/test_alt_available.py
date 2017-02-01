@@ -28,7 +28,8 @@ class TestAltAvailable(base.TestCase):
     def setUp(self):
         super(TestAltAvailable, self).setUp()
         self.useFixture(fake_config.ConfigFixture())
-        self.stubs.Set(config, 'TempestConfigPrivate', fake_config.FakePrivate)
+        self.patchobject(config, 'TempestConfigPrivate',
+                         fake_config.FakePrivate)
 
     def run_test(self, dynamic_creds, use_accounts_file, creds):
 
@@ -36,7 +37,7 @@ class TestAltAvailable(base.TestCase):
                              dynamic_creds, group='auth')
         if use_accounts_file:
             accounts = [dict(username="u%s" % ii,
-                             tenant_name="t%s" % ii,
+                             project_name="t%s" % ii,
                              password="p") for ii in creds]
             self.useFixture(mockpatch.Patch(
                 'tempest.common.preprov_creds.read_accounts_yaml',
@@ -48,28 +49,6 @@ class TestAltAvailable(base.TestCase):
         else:
             self.useFixture(mockpatch.Patch('os.path.isfile',
                                             return_value=False))
-            cred_prefix = ['', 'alt_']
-            for ii in range(0, 2):
-                if len(creds) > ii:
-                    username = 'u%s' % creds[ii]
-                    tenant = 't%s' % creds[ii]
-                    password = 'p'
-                    domain = 'd'
-                else:
-                    username = None
-                    tenant = None
-                    password = None
-                    domain = None
-
-                cfg.CONF.set_default('%susername' % cred_prefix[ii], username,
-                                     group='identity')
-                cfg.CONF.set_default('%stenant_name' % cred_prefix[ii], tenant,
-                                     group='identity')
-                cfg.CONF.set_default('%spassword' % cred_prefix[ii], password,
-                                     group='identity')
-                cfg.CONF.set_default('%sdomain_name' % cred_prefix[ii], domain,
-                                     group='identity')
-
         expected = len(set(creds)) > 1 or dynamic_creds
         observed = credentials.is_alt_available(
             identity_version=self.identity_version)
@@ -94,21 +73,6 @@ class TestAltAvailable(base.TestCase):
     def test__no_dynamic_creds__accounts_file__two_users_identical(self):
         self.run_test(dynamic_creds=False,
                       use_accounts_file=True,
-                      creds=['1', '1'])
-
-    def test__no_dynamic_creds__no_accounts_file__one_user(self):
-        self.run_test(dynamic_creds=False,
-                      use_accounts_file=False,
-                      creds=['1'])
-
-    def test__no_dynamic_creds__no_accounts_file__two_users(self):
-        self.run_test(dynamic_creds=False,
-                      use_accounts_file=False,
-                      creds=['1', '2'])
-
-    def test__no_dynamic_creds__no_accounts_file__two_users_identical(self):
-        self.run_test(dynamic_creds=False,
-                      use_accounts_file=False,
                       creds=['1', '1'])
 
 

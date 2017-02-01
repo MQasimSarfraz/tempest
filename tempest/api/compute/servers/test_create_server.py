@@ -19,8 +19,8 @@ import testtools
 from tempest.api.compute import base
 from tempest.common.utils import data_utils
 from tempest.common.utils.linux import remote_client
-from tempest.common import waiters
 from tempest import config
+from tempest.lib import decorators
 from tempest import test
 
 CONF = config.CONF
@@ -38,7 +38,6 @@ class ServersTestJSON(base.BaseV2ComputeTest):
     def setup_clients(cls):
         super(ServersTestJSON, cls).setup_clients()
         cls.client = cls.servers_client
-        cls.network_client = cls.os.network_client
         cls.networks_client = cls.os.networks_client
         cls.subnets_client = cls.os.subnets_client
 
@@ -49,7 +48,8 @@ class ServersTestJSON(base.BaseV2ComputeTest):
         cls.meta = {'hello': 'world'}
         cls.accessIPv4 = '1.1.1.1'
         cls.accessIPv6 = '0000:0000:0000:0000:0000:babe:220.12.22.2'
-        cls.name = data_utils.rand_name('server')
+        cls.name = data_utils.rand_name(cls.__name__ + '-server')
+        cls.password = data_utils.rand_password()
         disk_config = cls.disk_config
         cls.server_initial = cls.create_test_server(
             validatable=True,
@@ -58,8 +58,8 @@ class ServersTestJSON(base.BaseV2ComputeTest):
             metadata=cls.meta,
             accessIPv4=cls.accessIPv4,
             accessIPv6=cls.accessIPv6,
-            disk_config=disk_config)
-        cls.password = cls.server_initial['adminPass']
+            disk_config=disk_config,
+            adminPass=cls.password)
         cls.server = (cls.client.show_server(cls.server_initial['id'])
                       ['server'])
 
@@ -78,7 +78,7 @@ class ServersTestJSON(base.BaseV2ComputeTest):
         return net
 
     @test.attr(type='smoke')
-    @test.idempotent_id('5de47127-9977-400a-936f-abcfbec1218f')
+    @decorators.idempotent_id('5de47127-9977-400a-936f-abcfbec1218f')
     def test_verify_server_details(self):
         # Verify the specified server attributes are set correctly
         self.assertEqual(self.accessIPv4, self.server['accessIPv4'])
@@ -92,7 +92,7 @@ class ServersTestJSON(base.BaseV2ComputeTest):
         self.assertEqual(self.meta, self.server['metadata'])
 
     @test.attr(type='smoke')
-    @test.idempotent_id('9a438d88-10c6-4bcd-8b5b-5b6e25e1346f')
+    @decorators.idempotent_id('9a438d88-10c6-4bcd-8b5b-5b6e25e1346f')
     def test_list_servers(self):
         # The created server should be in the list of all servers
         body = self.client.list_servers()
@@ -100,7 +100,7 @@ class ServersTestJSON(base.BaseV2ComputeTest):
         found = any([i for i in servers if i['id'] == self.server['id']])
         self.assertTrue(found)
 
-    @test.idempotent_id('585e934c-448e-43c4-acbf-d06a9b899997')
+    @decorators.idempotent_id('585e934c-448e-43c4-acbf-d06a9b899997')
     def test_list_servers_with_detail(self):
         # The created server should be in the detailed list of all servers
         body = self.client.list_servers(detail=True)
@@ -108,7 +108,7 @@ class ServersTestJSON(base.BaseV2ComputeTest):
         found = any([i for i in servers if i['id'] == self.server['id']])
         self.assertTrue(found)
 
-    @test.idempotent_id('cbc0f52f-05aa-492b-bdc1-84b575ca294b')
+    @decorators.idempotent_id('cbc0f52f-05aa-492b-bdc1-84b575ca294b')
     @testtools.skipUnless(CONF.validation.run_validation,
                           'Instance validation tests are disabled.')
     def test_verify_created_server_vcpus(self):
@@ -119,10 +119,12 @@ class ServersTestJSON(base.BaseV2ComputeTest):
             self.get_server_ip(self.server),
             self.ssh_user,
             self.password,
-            self.validation_resources['keypair']['private_key'])
+            self.validation_resources['keypair']['private_key'],
+            server=self.server,
+            servers_client=self.client)
         self.assertEqual(flavor['vcpus'], linux_client.get_number_of_vcpus())
 
-    @test.idempotent_id('ac1ad47f-984b-4441-9274-c9079b7a0666')
+    @decorators.idempotent_id('ac1ad47f-984b-4441-9274-c9079b7a0666')
     @testtools.skipUnless(CONF.validation.run_validation,
                           'Instance validation tests are disabled.')
     def test_host_name_is_same_as_server_name(self):
@@ -131,20 +133,21 @@ class ServersTestJSON(base.BaseV2ComputeTest):
             self.get_server_ip(self.server),
             self.ssh_user,
             self.password,
-            self.validation_resources['keypair']['private_key'])
-        self.assertTrue(linux_client.hostname_equals_servername(self.name))
+            self.validation_resources['keypair']['private_key'],
+            server=self.server,
+            servers_client=self.client)
+        hostname = linux_client.get_hostname()
+        msg = ('Failed while verifying servername equals hostname. Expected '
+               'hostname "%s" but got "%s".' % (self.name, hostname))
+        self.assertEqual(self.name.lower(), hostname, msg)
 
-    @test.idempotent_id('ed20d3fb-9d1f-4329-b160-543fbd5d9811')
+    @decorators.idempotent_id('ed20d3fb-9d1f-4329-b160-543fbd5d9811')
+    @testtools.skipUnless(
+        test.is_scheduler_filter_enabled("ServerGroupAffinityFilter"),
+        'ServerGroupAffinityFilter is not available.')
     def test_create_server_with_scheduler_hint_group(self):
         # Create a server with the scheduler hint "group".
-        name = data_utils.rand_name('server_group')
-        policies = ['affinity']
-        body = self.server_groups_client.create_server_group(
-            name=name, policies=policies)['server_group']
-        group_id = body['id']
-        self.addCleanup(self.server_groups_client.delete_server_group,
-                        group_id)
-
+        group_id = self.create_test_server_group()['id']
         hints = {'group': group_id}
         server = self.create_test_server(scheduler_hints=hints,
                                          wait_until='ACTIVE')
@@ -154,7 +157,7 @@ class ServersTestJSON(base.BaseV2ComputeTest):
                         ['server_group'])
         self.assertIn(server['id'], server_group['members'])
 
-    @test.idempotent_id('0578d144-ed74-43f8-8e57-ab10dbf9b3c2')
+    @decorators.idempotent_id('0578d144-ed74-43f8-8e57-ab10dbf9b3c2')
     @testtools.skipUnless(CONF.service_available.neutron,
                           'Neutron service must be available.')
     def test_verify_multiple_nics_order(self):
@@ -175,12 +178,7 @@ class ServersTestJSON(base.BaseV2ComputeTest):
         # when trying to delete the subnet. The tear down in the base class
         # will try to delete the server and get a 404 but it's ignored so
         # we're OK.
-        def cleanup_server():
-            self.client.delete_server(server_multi_nics['id'])
-            waiters.wait_for_server_termination(self.client,
-                                                server_multi_nics['id'])
-
-        self.addCleanup(cleanup_server)
+        self.addCleanup(self.delete_server, server_multi_nics['id'])
 
         addresses = (self.client.list_addresses(server_multi_nics['id'])
                      ['addresses'])
@@ -197,13 +195,9 @@ class ServersTestJSON(base.BaseV2ComputeTest):
         for address, network in zip(addr, networks):
             self.assertIn(address, network)
 
-    @test.idempotent_id('1678d144-ed74-43f8-8e57-ab10dbf9b3c2')
+    @decorators.idempotent_id('1678d144-ed74-43f8-8e57-ab10dbf9b3c2')
     @testtools.skipUnless(CONF.service_available.neutron,
                           'Neutron service must be available.')
-    # The below skipUnless should be removed once Kilo-eol happens.
-    @testtools.skipUnless(CONF.compute_feature_enabled.
-                          allow_duplicate_networks,
-                          'Duplicate networks must be allowed')
     def test_verify_duplicate_network_nics(self):
         # Verify that server creation does not fail when more than one nic
         # is created on the same network.
@@ -216,13 +210,7 @@ class ServersTestJSON(base.BaseV2ComputeTest):
 
         server_multi_nics = self.create_test_server(
             networks=networks, wait_until='ACTIVE')
-
-        def cleanup_server():
-            self.client.delete_server(server_multi_nics['id'])
-            waiters.wait_for_server_termination(self.client,
-                                                server_multi_nics['id'])
-
-        self.addCleanup(cleanup_server)
+        self.addCleanup(self.delete_server, server_multi_nics['id'])
 
         addresses = (self.client.list_addresses(server_multi_nics['id'])
                      ['addresses'])
@@ -257,42 +245,27 @@ class ServersWithSpecificFlavorTestJSON(base.BaseV2ComputeAdminTest):
 
         super(ServersWithSpecificFlavorTestJSON, cls).resource_setup()
 
-    @test.idempotent_id('b3c7bcfc-bb5b-4e22-b517-c7f686b802ca')
+    @decorators.idempotent_id('b3c7bcfc-bb5b-4e22-b517-c7f686b802ca')
     @testtools.skipUnless(CONF.validation.run_validation,
                           'Instance validation tests are disabled.')
     def test_verify_created_server_ephemeral_disk(self):
         # Verify that the ephemeral disk is created when creating server
+        flavor_base = self.flavors_client.show_flavor(
+            self.flavor_ref)['flavor']
 
-        def create_flavor_with_extra_specs():
-            flavor_with_eph_disk_name = data_utils.rand_name('eph_flavor')
-            flavor_with_eph_disk_id = data_utils.rand_int_id(start=1000)
-            ram = 64
-            vcpus = 1
-            disk = 0
+        def create_flavor_with_ephemeral(ephem_disk):
+            flavor_id = data_utils.rand_int_id(start=1000)
+            name = 'flavor_with_ephemeral_%s' % ephem_disk
+            flavor_name = data_utils.rand_name(name)
 
-            # Create a flavor with extra specs
-            flavor = (self.flavor_client.
-                      create_flavor(name=flavor_with_eph_disk_name,
-                                    ram=ram, vcpus=vcpus, disk=disk,
-                                    id=flavor_with_eph_disk_id,
-                                    ephemeral=1))['flavor']
-            self.addCleanup(flavor_clean_up, flavor['id'])
+            ram = flavor_base['ram']
+            vcpus = flavor_base['vcpus']
+            disk = flavor_base['disk']
 
-            return flavor['id']
-
-        def create_flavor_without_extra_specs():
-            flavor_no_eph_disk_name = data_utils.rand_name('no_eph_flavor')
-            flavor_no_eph_disk_id = data_utils.rand_int_id(start=1000)
-
-            ram = 64
-            vcpus = 1
-            disk = 0
-
-            # Create a flavor without extra specs
-            flavor = (self.flavor_client.
-                      create_flavor(name=flavor_no_eph_disk_name,
-                                    ram=ram, vcpus=vcpus, disk=disk,
-                                    id=flavor_no_eph_disk_id))['flavor']
+            # Create a flavor with ephemeral disk
+            flavor = self.flavor_client.create_flavor(
+                name=flavor_name, ram=ram, vcpus=vcpus, disk=disk,
+                id=flavor_id, ephemeral=ephem_disk)['flavor']
             self.addCleanup(flavor_clean_up, flavor['id'])
 
             return flavor['id']
@@ -301,8 +274,8 @@ class ServersWithSpecificFlavorTestJSON(base.BaseV2ComputeAdminTest):
             self.flavor_client.delete_flavor(flavor_id)
             self.flavor_client.wait_for_resource_deletion(flavor_id)
 
-        flavor_with_eph_disk_id = create_flavor_with_extra_specs()
-        flavor_no_eph_disk_id = create_flavor_without_extra_specs()
+        flavor_with_eph_disk_id = create_flavor_with_ephemeral(ephem_disk=1)
+        flavor_no_eph_disk_id = create_flavor_with_ephemeral(ephem_disk=0)
 
         admin_pass = self.image_ssh_password
 
@@ -312,15 +285,17 @@ class ServersWithSpecificFlavorTestJSON(base.BaseV2ComputeAdminTest):
             adminPass=admin_pass,
             flavor=flavor_no_eph_disk_id)
 
-        # Get partition number of server without extra specs.
+        # Get partition number of server without ephemeral disk.
         server_no_eph_disk = self.client.show_server(
             server_no_eph_disk['id'])['server']
         linux_client = remote_client.RemoteClient(
             self.get_server_ip(server_no_eph_disk),
             self.ssh_user,
             admin_pass,
-            self.validation_resources['keypair']['private_key'])
-        partition_num = len(linux_client.get_partitions().split('\n'))
+            self.validation_resources['keypair']['private_key'],
+            server=server_no_eph_disk,
+            servers_client=self.client)
+        disks_num = len(linux_client.get_disks().split('\n'))
 
         # Explicit server deletion necessary for Juno compatibility
         self.client.delete_server(server_no_eph_disk['id'])
@@ -337,9 +312,11 @@ class ServersWithSpecificFlavorTestJSON(base.BaseV2ComputeAdminTest):
             self.get_server_ip(server_with_eph_disk),
             self.ssh_user,
             admin_pass,
-            self.validation_resources['keypair']['private_key'])
-        partition_num_emph = len(linux_client.get_partitions().split('\n'))
-        self.assertEqual(partition_num + 1, partition_num_emph)
+            self.validation_resources['keypair']['private_key'],
+            server=server_with_eph_disk,
+            servers_client=self.client)
+        disks_num_eph = len(linux_client.get_disks().split('\n'))
+        self.assertEqual(disks_num + 1, disks_num_eph)
 
 
 class ServersTestManualDisk(ServersTestJSON):

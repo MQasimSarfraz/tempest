@@ -13,11 +13,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from tempest_lib import exceptions as lib_exc
-
 from tempest.api.compute.security_groups import base
 from tempest.common.utils import data_utils
 from tempest.common import waiters
+from tempest.lib import decorators
+from tempest.lib import exceptions as lib_exc
 from tempest import test
 
 
@@ -29,13 +29,13 @@ class SecurityGroupsTestJSON(base.BaseSecurityGroupsTest):
         cls.client = cls.security_groups_client
 
     @test.attr(type='smoke')
-    @test.idempotent_id('eb2b087d-633d-4d0d-a7bd-9e6ba35b32de')
+    @decorators.idempotent_id('eb2b087d-633d-4d0d-a7bd-9e6ba35b32de')
     @test.services('network')
     def test_security_groups_create_list_delete(self):
         # Positive test:Should return the list of Security Groups
         # Create 3 Security Groups
         security_group_list = []
-        for i in range(3):
+        for _ in range(3):
             body = self.create_security_group()
             security_group_list.append(body)
         # Fetch all Security Groups and verify the list
@@ -61,7 +61,7 @@ class SecurityGroupsTestJSON(base.BaseSecurityGroupsTest):
                          "list" % ', '.join(m_group['name']
                                             for m_group in deleted_sgs))
 
-    @test.idempotent_id('ecc0da4a-2117-48af-91af-993cca39a615')
+    @decorators.idempotent_id('ecc0da4a-2117-48af-91af-993cca39a615')
     @test.services('network')
     def test_security_group_create_get_delete(self):
         # Security Group should be created, fetched and deleted
@@ -83,7 +83,7 @@ class SecurityGroupsTestJSON(base.BaseSecurityGroupsTest):
         self.client.delete_security_group(securitygroup['id'])
         self.client.wait_for_resource_deletion(securitygroup['id'])
 
-    @test.idempotent_id('fe4abc0d-83f5-4c50-ad11-57a1127297a2')
+    @decorators.idempotent_id('fe4abc0d-83f5-4c50-ad11-57a1127297a2')
     @test.services('network')
     def test_server_security_groups(self):
         # Checks that security groups may be added and linked to a server
@@ -95,12 +95,9 @@ class SecurityGroupsTestJSON(base.BaseSecurityGroupsTest):
 
         # Create server and add the security group created
         # above to the server we just created
-        server_name = data_utils.rand_name('server')
-        server = self.create_test_server(name=server_name)
+        server = self.create_test_server(wait_until='ACTIVE')
         server_id = server['id']
-        waiters.wait_for_server_status(self.servers_client, server_id,
-                                       'ACTIVE')
-        self.servers_client.add_security_group(server_id, sg['name'])
+        self.servers_client.add_security_group(server_id, name=sg['name'])
 
         # Check that we are not able to delete the security
         # group since it is in use by an active server
@@ -109,10 +106,10 @@ class SecurityGroupsTestJSON(base.BaseSecurityGroupsTest):
                           sg['id'])
 
         # Reboot and add the other security group
-        self.servers_client.reboot_server(server_id, 'HARD')
+        self.servers_client.reboot_server(server_id, type='HARD')
         waiters.wait_for_server_status(self.servers_client, server_id,
                                        'ACTIVE')
-        self.servers_client.add_security_group(server_id, sg2['name'])
+        self.servers_client.add_security_group(server_id, name=sg2['name'])
 
         # Check that we are not able to delete the other security
         # group since it is in use by an active server
@@ -128,7 +125,7 @@ class SecurityGroupsTestJSON(base.BaseSecurityGroupsTest):
         self.client.delete_security_group(sg['id'])
         self.client.delete_security_group(sg2['id'])
 
-    @test.idempotent_id('7d4e1d3c-3209-4d6d-b020-986304ebad1f')
+    @decorators.idempotent_id('7d4e1d3c-3209-4d6d-b020-986304ebad1f')
     @test.services('network')
     def test_update_security_groups(self):
         # Update security group name and description

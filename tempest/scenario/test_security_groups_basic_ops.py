@@ -12,18 +12,17 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+from oslo_log import log
+import testtools
 
-from oslo_log import log as logging
-
-from tempest import clients
 from tempest.common.utils import data_utils
+from tempest.common.utils import net_info
 from tempest import config
 from tempest.scenario import manager
 from tempest import test
 
 CONF = config.CONF
-
-LOG = logging.getLogger(__name__)
+LOG = log.getLogger(__name__)
 
 
 class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
@@ -46,6 +45,12 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
     ssh connection.
     success - ping returns
     failure - ping_timeout reached
+
+    multi-node:
+        Multi-Node mode is enabled when CONF.compute.min_compute_nodes > 1.
+        Tests connectivity between servers on different compute nodes.
+        When enabled, test will boot each new server to different
+        compute nodes.
 
     setup:
         for primary tenant:
@@ -107,9 +112,9 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
             access point
         """
 
-        def __init__(self, credentials):
-            self.manager = clients.Manager(credentials)
+        def __init__(self, clients):
             # Credentials from manager are filled with both names and IDs
+            self.manager = clients
             self.creds = self.manager.credentials
             self.network = None
             self.subnet = None
@@ -125,17 +130,21 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
     @classmethod
     def skip_checks(cls):
         super(TestSecurityGroupsBasicOps, cls).skip_checks()
-        if CONF.baremetal.driver_enabled:
-            msg = ('Not currently supported by baremetal.')
-            raise cls.skipException(msg)
         if CONF.network.port_vnic_type in ['direct', 'macvtap']:
             msg = ('Not currently supported when using vnic_type'
                    ' direct or macvtap')
             raise cls.skipException(msg)
-        if not (CONF.network.tenant_networks_reachable or
+        if not (CONF.network.project_networks_reachable or
                 CONF.network.public_network_id):
-            msg = ('Either tenant_networks_reachable must be "true", or '
+            msg = ('Either project_networks_reachable must be "true", or '
                    'public_network_id must be defined.')
+            raise cls.skipException(msg)
+        if not test.is_extension_enabled('security-group', 'network'):
+            msg = "security-group extension not enabled."
+            raise cls.skipException(msg)
+        if CONF.network.shared_physical_network:
+            msg = ('Deployment uses a shared physical network, security '
+                   'groups not supported')
             raise cls.skipException(msg)
 
     @classmethod
@@ -143,26 +152,34 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
         # Create no network resources for these tests.
         cls.set_network_resources()
         super(TestSecurityGroupsBasicOps, cls).setup_credentials()
-        # TODO(mnewby) Consider looking up entities as needed instead
-        # of storing them as collections on the class.
-
-        # Credentials from the manager are filled with both IDs and Names
-        cls.alt_creds = cls.alt_manager.credentials
 
     @classmethod
     def resource_setup(cls):
         super(TestSecurityGroupsBasicOps, cls).resource_setup()
+
+        cls.multi_node = CONF.compute.min_compute_nodes > 1 and \
+            test.is_scheduler_filter_enabled("DifferentHostFilter")
+        if cls.multi_node:
+            LOG.info("Working in Multi Node mode")
+        else:
+            LOG.info("Working in Single Node mode")
+
         cls.floating_ips = {}
         cls.tenants = {}
-        creds = cls.manager.credentials
-        cls.primary_tenant = cls.TenantProperties(creds)
-        cls.alt_tenant = cls.TenantProperties(cls.alt_creds)
+        cls.primary_tenant = cls.TenantProperties(cls.os)
+        cls.alt_tenant = cls.TenantProperties(cls.os_alt)
         for tenant in [cls.primary_tenant, cls.alt_tenant]:
             cls.tenants[tenant.creds.tenant_id] = tenant
 
         cls.floating_ip_access = not CONF.network.public_router_id
 
     def setUp(self):
+        """Set up a single tenant with an accessible server.
+
+        If multi-host is enabled, save created server uuids.
+        """
+        self.servers = []
+
         super(TestSecurityGroupsBasicOps, self).setUp()
         self._deploy_tenant(self.primary_tenant)
         self._verify_network_details(self.primary_tenant)
@@ -176,14 +193,14 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
         access_sg = self._create_empty_security_group(
             namestart='secgroup_access-',
             tenant_id=tenant.creds.tenant_id,
-            client=tenant.manager.network_client
+            client=tenant.manager.security_groups_client
         )
 
-        # don't use default secgroup since it allows in-tenant traffic
+        # don't use default secgroup since it allows in-project traffic
         def_sg = self._create_empty_security_group(
             namestart='secgroup_general-',
             tenant_id=tenant.creds.tenant_id,
-            client=tenant.manager.network_client
+            client=tenant.manager.security_groups_client
         )
         tenant.security_groups.update(access=access_sg, default=def_sg)
         ssh_rule = dict(
@@ -192,9 +209,11 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
             port_range_max=22,
             direction='ingress',
         )
-        self._create_security_group_rule(secgroup=access_sg,
-                                         client=tenant.manager.network_client,
-                                         **ssh_rule)
+        sec_group_rules_client = tenant.manager.security_group_rules_client
+        self._create_security_group_rule(
+            secgroup=access_sg,
+            sec_group_rules_client=sec_group_rules_client,
+            **ssh_rule)
 
     def _verify_network_details(self, tenant):
         # Checks that we see the newly created network/subnet/router via
@@ -204,56 +223,66 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
         seen_names = [n['name'] for n in seen_nets]
         seen_ids = [n['id'] for n in seen_nets]
 
-        self.assertIn(tenant.network.name, seen_names)
-        self.assertIn(tenant.network.id, seen_ids)
+        self.assertIn(tenant.network['name'], seen_names)
+        self.assertIn(tenant.network['id'], seen_ids)
 
         seen_subnets = [(n['id'], n['cidr'], n['network_id'])
                         for n in self._list_subnets()]
-        mysubnet = (tenant.subnet.id, tenant.subnet.cidr, tenant.network.id)
+        mysubnet = (tenant.subnet['id'], tenant.subnet['cidr'],
+                    tenant.network['id'])
         self.assertIn(mysubnet, seen_subnets)
 
         seen_routers = self._list_routers()
         seen_router_ids = [n['id'] for n in seen_routers]
         seen_router_names = [n['name'] for n in seen_routers]
 
-        self.assertIn(tenant.router.name, seen_router_names)
-        self.assertIn(tenant.router.id, seen_router_ids)
+        self.assertIn(tenant.router['name'], seen_router_names)
+        self.assertIn(tenant.router['id'], seen_router_ids)
 
-        myport = (tenant.router.id, tenant.subnet.id)
+        myport = (tenant.router['id'], tenant.subnet['id'])
         router_ports = [(i['device_id'], i['fixed_ips'][0]['subnet_id']) for i
                         in self._list_ports()
-                        if self._is_router_port(i)]
+                        if net_info.is_router_interface_port(i)]
 
         self.assertIn(myport, router_ports)
 
-    def _is_router_port(self, port):
-        """Return True if port is a router interface."""
-        # NOTE(armando-migliaccio): match device owner for both centralized
-        # and distributed routers; 'device_owner' is "" by default.
-        return port['device_owner'].startswith('network:router_interface')
+    def _create_server(self, name, tenant, security_groups, **kwargs):
+        """Creates a server and assigns it to security group.
 
-    def _create_server(self, name, tenant, security_groups=None):
-        """creates a server and assigns to security group"""
-        self._set_compute_context(tenant)
-        if security_groups is None:
-            security_groups = [tenant.security_groups['default']]
+        If multi-host is enabled, Ensures servers are created on different
+        compute nodes, by storing created servers' ids and uses different_host
+        as scheduler_hints on creation.
+        Validates servers are created as requested, using admin client.
+        """
         security_groups_names = [{'name': s['name']} for s in security_groups]
-        create_kwargs = {
-            'networks': [
-                {'uuid': tenant.network.id},
-            ],
-            'key_name': tenant.keypair['name'],
-            'security_groups': security_groups_names
-        }
+        if self.multi_node:
+            kwargs["scheduler_hints"] = {'different_host': self.servers}
         server = self.create_server(
             name=name,
-            network_client=tenant.manager.network_client,
-            networks_client=tenant.manager.networks_client,
-            ports_client=tenant.manager.ports_client,
-            create_kwargs=create_kwargs)
-        self.assertEqual(
-            sorted([s['name'] for s in security_groups]),
-            sorted([s['name'] for s in server['security_groups']]))
+            networks=[{'uuid': tenant.network["id"]}],
+            key_name=tenant.keypair['name'],
+            security_groups=security_groups_names,
+            wait_until='ACTIVE',
+            clients=tenant.manager,
+            **kwargs)
+        if 'security_groups' in server:
+            self.assertEqual(
+                sorted([s['name'] for s in security_groups]),
+                sorted([s['name'] for s in server['security_groups']]))
+
+        # Verify servers are on different compute nodes
+        if self.multi_node:
+            adm_get_server = self.admin_manager.servers_client.show_server
+            new_host = adm_get_server(server["id"])["server"][
+                "OS-EXT-SRV-ATTR:host"]
+            host_list = [adm_get_server(s)["server"]["OS-EXT-SRV-ATTR:host"]
+                         for s in self.servers]
+            self.assertNotIn(new_host, host_list,
+                             message="Failed to boot servers on different "
+                                     "Compute nodes.")
+
+            self.servers.append(server["id"])
+
         return server
 
     def _create_tenant_servers(self, tenant, num=1):
@@ -263,12 +292,13 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
                    num=i
             )
             name = data_utils.rand_name(name)
-            server = self._create_server(name, tenant)
+            server = self._create_server(name, tenant,
+                                         [tenant.security_groups['default']])
             tenant.servers.append(server)
 
     def _set_access_point(self, tenant):
         # creates a server in a secgroup with rule allowing external ssh
-        # in order to access tenant internal network
+        # in order to access project internal network
         # workaround ip namespace
         secgroups = tenant.security_groups.values()
         name = 'server-{tenant}-access_point'.format(
@@ -286,16 +316,13 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
             client=tenant.manager.floating_ips_client)
         self.floating_ips.setdefault(server['id'], floating_ip)
 
-    def _create_tenant_network(self, tenant):
+    def _create_tenant_network(self, tenant, port_security_enabled=True):
         network, subnet, router = self.create_networks(
-            client=tenant.manager.network_client,
             networks_client=tenant.manager.networks_client,
-            subnets_client=tenant.manager.subnets_client)
+            routers_client=tenant.manager.routers_client,
+            subnets_client=tenant.manager.subnets_client,
+            port_security_enabled=port_security_enabled)
         tenant.set_network(network, subnet, router)
-
-    def _set_compute_context(self, tenant):
-        self.servers_client = tenant.manager.servers_client
-        return self.servers_client
 
     def _deploy_tenant(self, tenant_or_id):
         """creates:
@@ -310,7 +337,6 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
             tenant = self.tenants[tenant_or_id]
         else:
             tenant = tenant_or_id
-        self._set_compute_context(tenant)
         self._create_tenant_keypairs(tenant)
         self._create_tenant_network(tenant)
         self._create_tenant_security_groups(tenant)
@@ -319,10 +345,10 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
     def _get_server_ip(self, server, floating=False):
         """returns the ip (floating/internal) of a server"""
         if floating:
-            server_ip = self.floating_ips[server['id']].floating_ip_address
+            server_ip = self.floating_ips[server['id']]['floating_ip_address']
         else:
             server_ip = None
-            network_name = self.tenants[server['tenant_id']].network.name
+            network_name = self.tenants[server['tenant_id']].network['name']
             if network_name in server['addresses']:
                 server_ip = server['addresses'][network_name][0]['addr']
         return server_ip
@@ -330,10 +356,10 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
     def _connect_to_access_point(self, tenant):
         """create ssh connection to tenant access point"""
         access_point_ssh = \
-            self.floating_ips[tenant.access_point['id']].floating_ip_address
+            self.floating_ips[tenant.access_point['id']]['floating_ip_address']
         private_key = tenant.keypair['private_key']
-        access_point_ssh = self._ssh_to_server(access_point_ssh,
-                                               private_key=private_key)
+        access_point_ssh = self.get_remote_client(
+            access_point_ssh, private_key=private_key)
         return access_point_ssh
 
     def _check_connectivity(self, access_point, ip, should_succeed=True):
@@ -354,11 +380,12 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
     def _test_in_tenant_allow(self, tenant):
         ruleset = dict(
             protocol='icmp',
-            remote_group_id=tenant.security_groups['default'].id,
+            remote_group_id=tenant.security_groups['default']['id'],
             direction='ingress'
         )
         self._create_security_group_rule(
             secgroup=tenant.security_groups['default'],
+            security_groups_client=tenant.manager.security_groups_client,
             **ruleset
         )
         access_point_ssh = self._connect_to_access_point(tenant)
@@ -384,9 +411,11 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
             protocol='icmp',
             direction='ingress'
         )
+        sec_group_rules_client = (
+            dest_tenant.manager.security_group_rules_client)
         self._create_security_group_rule(
             secgroup=dest_tenant.security_groups['default'],
-            client=dest_tenant.manager.network_client,
+            sec_group_rules_client=sec_group_rules_client,
             **ruleset
         )
         access_point_ssh = self._connect_to_access_point(source_tenant)
@@ -398,9 +427,11 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
         self._test_cross_tenant_block(dest_tenant, source_tenant)
 
         # allow reverse traffic and check
+        sec_group_rules_client = (
+            source_tenant.manager.security_group_rules_client)
         self._create_security_group_rule(
             secgroup=source_tenant.security_groups['default'],
-            client=source_tenant.manager.network_client,
+            sec_group_rules_client=sec_group_rules_client,
             **ruleset
         )
 
@@ -425,7 +456,7 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
             for port in port_list if port['fixed_ips']
         ]
         server_ip = self._get_server_ip(tenant.access_point)
-        subnet_id = tenant.subnet.id
+        subnet_id = tenant.subnet['id']
         self.assertIn((subnet_id, server_ip, mac_addr), port_detail_list)
 
     @test.idempotent_id('e79f879e-debb-440c-a7e4-efeda05b6848')
@@ -434,7 +465,7 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
         if not self.credentials_provider.is_multi_tenant():
             raise self.skipException("No secondary tenant defined")
         try:
-            # deploy new tenant
+            # deploy new project
             self._deploy_tenant(self.alt_tenant)
             self._verify_network_details(self.alt_tenant)
             self._verify_mac_addr(self.alt_tenant)
@@ -476,14 +507,15 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
         new_sg = self._create_empty_security_group(
             namestart='secgroup_new-',
             tenant_id=new_tenant.creds.tenant_id,
-            client=new_tenant.manager.network_client)
+            client=new_tenant.manager.security_groups_client)
         icmp_rule = dict(
             protocol='icmp',
             direction='ingress',
         )
+        sec_group_rules_client = new_tenant.manager.security_group_rules_client
         self._create_security_group_rule(
             secgroup=new_sg,
-            client=new_tenant.manager.network_client,
+            sec_group_rules_client=sec_group_rules_client,
             **icmp_rule)
         new_tenant.security_groups.update(new_sg=new_sg)
 
@@ -492,7 +524,8 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
                tenant=new_tenant.creds.tenant_name
         )
         name = data_utils.rand_name(name)
-        server = self._create_server(name, new_tenant)
+        server = self._create_server(name, new_tenant,
+                                     [new_tenant.security_groups['default']])
 
         # Check connectivity failure with default security group
         try:
@@ -505,7 +538,7 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
 
             # update port with new security group and check connectivity
             self.ports_client.update_port(port_id, security_groups=[
-                new_tenant.security_groups['new_sg'].id])
+                new_tenant.security_groups['new_sg']['id']])
             self._check_connectivity(
                 access_point=access_point_ssh,
                 ip=self._get_server_ip(server))
@@ -524,7 +557,7 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
         tenant = self.primary_tenant
         ip = self._get_server_ip(tenant.access_point,
                                  floating=self.floating_ip_access)
-        ssh_login = CONF.compute.image_ssh_user
+        ssh_login = CONF.validation.image_ssh_user
         private_key = tenant.keypair['private_key']
         self.check_vm_connectivity(ip,
                                    should_connect=False)
@@ -558,7 +591,8 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
                tenant=new_tenant.creds.tenant_name
         )
         name = data_utils.rand_name(name)
-        server = self._create_server(name, new_tenant)
+        server = self._create_server(name, new_tenant,
+                                     [new_tenant.security_groups['default']])
 
         access_point_ssh = self._connect_to_access_point(new_tenant)
         server_id = server['id']
@@ -583,3 +617,32 @@ class TestSecurityGroupsBasicOps(manager.NetworkScenarioTest):
             for tenant in self.tenants.values():
                 self._log_console_output(servers=tenant.servers)
             raise
+
+    @test.requires_ext(service='network', extension='port-security')
+    @test.idempotent_id('13ccf253-e5ad-424b-9c4a-97b88a026699')
+    @testtools.skipUnless(
+        CONF.compute_feature_enabled.allow_port_security_disabled,
+        'Port security must be enabled.')
+    # TODO(mriedem): We shouldn't actually need to check this since neutron
+    # disables the port_security extension by default, but the problem is nova
+    # assumes port_security_enabled=True if it's not set on the network
+    # resource, which will mean nova may attempt to apply a security group on
+    # a port on that network which would fail. This is really a bug in nova.
+    @testtools.skipUnless(
+        CONF.network_feature_enabled.port_security,
+        'Port security must be enabled.')
+    @test.services('compute', 'network')
+    def test_boot_into_disabled_port_security_network_without_secgroup(self):
+        tenant = self.primary_tenant
+        self._create_tenant_network(tenant, port_security_enabled=False)
+        self.assertFalse(tenant.network['port_security_enabled'])
+        name = data_utils.rand_name('server-smoke')
+        sec_groups = []
+        server = self._create_server(name, tenant, sec_groups)
+        server_id = server['id']
+        ports = self._list_ports(device_id=server_id)
+        self.assertEqual(1, len(ports))
+        for port in ports:
+            self.assertEmpty(port['security_groups'],
+                             "Neutron shouldn't even use it's default sec "
+                             "group.")

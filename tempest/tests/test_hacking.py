@@ -147,3 +147,36 @@ class HackingTestCase(base.TestCase):
             " @testtools.skipUnless(CONF.something, 'msg')"))))
         self.assertEqual(0, len(list(checks.no_testtools_skip_decorator(
             " @testtools.skipIf(CONF.something, 'msg')"))))
+
+    def test_dont_import_local_tempest_code_into_lib(self):
+        self.assertEqual(0, len(list(checks.dont_import_local_tempest_into_lib(
+            "from tempest.common import waiters",
+            './tempest/common/compute.py'))))
+        self.assertEqual(0, len(list(checks.dont_import_local_tempest_into_lib(
+            "from tempest import config",
+            './tempest/common/compute.py'))))
+        self.assertEqual(0, len(list(checks.dont_import_local_tempest_into_lib(
+            "import tempest.exception",
+            './tempest/common/compute.py'))))
+        self.assertEqual(1, len(list(checks.dont_import_local_tempest_into_lib(
+            "from tempest.common import waiters",
+            './tempest/lib/common/compute.py'))))
+        self.assertEqual(1, len(list(checks.dont_import_local_tempest_into_lib(
+            "from tempest import config",
+            './tempest/lib/common/compute.py'))))
+        self.assertEqual(1, len(list(checks.dont_import_local_tempest_into_lib(
+            "import tempest.exception",
+            './tempest/lib/common/compute.py'))))
+
+    def test_dont_use_config_in_tempest_lib(self):
+        self.assertFalse(list(checks.dont_use_config_in_tempest_lib(
+            'from tempest import config', './tempest/common/compute.py')))
+        self.assertFalse(list(checks.dont_use_config_in_tempest_lib(
+            'from oslo_concurrency import lockutils',
+            './tempest/lib/auth.py')))
+        self.assertTrue(list(checks.dont_use_config_in_tempest_lib(
+            'from tempest import config', './tempest/lib/auth.py')))
+        self.assertTrue(list(checks.dont_use_config_in_tempest_lib(
+            'from oslo_config import cfg', './tempest/lib/decorators.py')))
+        self.assertTrue(list(checks.dont_use_config_in_tempest_lib(
+            'import tempest.config', './tempest/lib/common/rest_client.py')))

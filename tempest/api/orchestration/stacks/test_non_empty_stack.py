@@ -10,16 +10,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import logging
-
 from tempest.api.orchestration import base
 from tempest.common.utils import data_utils
 from tempest import config
 from tempest import test
 
 CONF = config.CONF
-
-LOG = logging.getLogger(__name__)
 
 
 class StacksTestJSON(base.BaseOrchestrationTest):
@@ -129,7 +125,7 @@ class StacksTestJSON(base.BaseOrchestrationTest):
                                        'resource_status_reason',
                                        'resource_status', 'event_time')
 
-        resource_statuses = map(lambda event: event['resource_status'], events)
+        resource_statuses = [event['resource_status'] for event in events]
         self.assertIn('CREATE_IN_PROGRESS', resource_statuses)
         self.assertIn('CREATE_COMPLETE', resource_statuses)
 

@@ -10,22 +10,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_log import log as logging
-
 from tempest.api.orchestration import base
 from tempest.common.utils import data_utils
 from tempest import test
 
 
-LOG = logging.getLogger(__name__)
-
-
 class StacksTestJSON(base.BaseOrchestrationTest):
     empty_template = "HeatTemplateFormatVersion: '2012-12-12'\n"
-
-    @classmethod
-    def resource_setup(cls):
-        super(StacksTestJSON, cls).resource_setup()
 
     @test.attr(type='smoke')
     @test.idempotent_id('d35d628c-07f6-4674-85a1-74db9919e986')

@@ -13,10 +13,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from tempest_lib import exceptions as lib_exc
-
 from tempest.api.identity import base
 from tempest.common.utils import data_utils
+from tempest.lib import exceptions as lib_exc
 from tempest import test
 
 
@@ -28,8 +27,20 @@ class UsersNegativeTest(base.BaseIdentityV3AdminTest):
         # Attempt to create a user in a non-existent domain should fail
         u_name = data_utils.rand_name('user')
         u_email = u_name + '@testmail.tm'
-        u_password = data_utils.rand_name('pass')
-        self.assertRaises(lib_exc.NotFound, self.client.create_user,
-                          u_name, u_password,
+        u_password = data_utils.rand_password()
+        self.assertRaises(lib_exc.NotFound, self.users_client.create_user,
+                          name=u_name, password=u_password,
                           email=u_email,
                           domain_id=data_utils.rand_uuid_hex())
+
+    @test.attr(type=['negative'])
+    @test.idempotent_id('b3c9fccc-4134-46f5-b600-1da6fb0a3b1f')
+    def test_authentication_for_disabled_user(self):
+        # Attempt to authenticate for disabled user should fail
+        password = data_utils.rand_password()
+        user = self.setup_test_user(password)
+        self.disable_user(user['name'], user['domain_id'])
+        self.assertRaises(lib_exc.Unauthorized, self.token.auth,
+                          username=user['name'],
+                          password=password,
+                          user_domain_id='default')

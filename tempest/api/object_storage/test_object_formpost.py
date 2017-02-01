@@ -31,11 +31,8 @@ class ObjectFormPostTest(base.BaseObjectTest):
     @classmethod
     def resource_setup(cls):
         super(ObjectFormPostTest, cls).resource_setup()
-        cls.container_name = data_utils.rand_name(name='TestContainer')
+        cls.container_name = cls.create_container()
         cls.object_name = data_utils.rand_name(name='ObjectTemp')
-
-        cls.container_client.create_container(cls.container_name)
-        cls.containers = [cls.container_name]
 
         cls.key = 'Meta'
         cls.metadata = {'Temp-URL-Key': cls.key}
@@ -56,7 +53,7 @@ class ObjectFormPostTest(base.BaseObjectTest):
     @classmethod
     def resource_cleanup(cls):
         cls.account_client.delete_account_metadata(metadata=cls.metadata)
-        cls.delete_containers(cls.containers)
+        cls.delete_containers()
         super(ObjectFormPostTest, cls).resource_cleanup()
 
     def get_multipart_form(self, expires=600):
@@ -75,7 +72,9 @@ class ObjectFormPostTest(base.BaseObjectTest):
                                             max_file_count,
                                             expires)
 
-        signature = hmac.new(self.key, hmac_body, hashlib.sha1).hexdigest()
+        signature = hmac.new(
+            self.key.encode(), hmac_body.encode(), hashlib.sha1
+        ).hexdigest()
 
         fields = {'redirect': redirect,
                   'max_file_size': str(max_file_size),
@@ -122,4 +121,4 @@ class ObjectFormPostTest(base.BaseObjectTest):
         resp, body = self.object_client.get("%s/%s%s" % (
             self.container_name, self.object_name, "testfile"))
         self.assertHeaders(resp, "Object", "GET")
-        self.assertEqual(body, "hello world")
+        self.assertEqual(body.decode(), "hello world")

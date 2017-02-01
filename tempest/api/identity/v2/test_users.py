@@ -13,15 +13,16 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import copy
 import time
 
-from tempest_lib.common.utils import data_utils
-from tempest_lib import exceptions
-
 from tempest.api.identity import base
-from tempest import manager
+from tempest import config
+from tempest.lib.common.utils import data_utils
+from tempest.lib import exceptions
 from tempest import test
+
+
+CONF = config.CONF
 
 
 class IdentityUsersTest(base.BaseIdentityV2Test):
@@ -34,51 +35,66 @@ class IdentityUsersTest(base.BaseIdentityV2Test):
         cls.password = cls.creds.password
         cls.tenant_name = cls.creds.tenant_name
 
-    @test.idempotent_id('165859c9-277f-4124-9479-a7d1627b0ca7')
-    def test_user_update_own_password(self):
-        self.new_creds = copy.copy(self.creds.credentials)
-        self.new_creds.password = data_utils.rand_password()
-        # we need new non-admin Identity Client with new credentials, since
-        # current non_admin_client token will be revoked after updating
-        # password
-        self.non_admin_client_for_cleanup = copy.copy(self.non_admin_client)
-        self.non_admin_client_for_cleanup.auth_provider = (
-            manager.get_auth_provider(self.new_creds))
-        user_id = self.creds.credentials.user_id
-        old_pass = self.creds.credentials.password
-        new_pass = self.new_creds.password
+    def _update_password(self, user_id, original_password, password):
+        self.non_admin_users_client.update_user_own_password(
+            user_id, password=password, original_password=original_password)
 
-        # to change password back. important for allow_tenant_isolation = false
-        self.addCleanup(
-            self.non_admin_client_for_cleanup.update_user_own_password,
-            user_id=user_id,
-            new_pass=old_pass,
-            old_pass=new_pass)
-
-        # user updates own password
-        resp = self.non_admin_client.update_user_own_password(
-            user_id=user_id, new_pass=new_pass, old_pass=old_pass)['access']
-
-        # TODO(lbragstad): Sleeping after the response status has been checked
-        # and the body loaded as JSON allows requests to fail-fast. The sleep
-        # is necessary because keystone will err on the side of security and
-        # invalidate tokens within a small margin of error (within the same
-        # wall clock second) after a revocation event is issued (such as a
-        # password change). Remove this once keystone and Fernet support
-        # sub-second precision.
+        # NOTE(morganfainberg): Fernet tokens are not subsecond aware and
+        # Keystone should only be precise to the second. Sleep to ensure
+        # we are passing the second boundary.
         time.sleep(1)
 
-        # check authorization with new token
-        self.non_admin_token_client.auth_token(resp['token']['id'])
         # check authorization with new password
         self.non_admin_token_client.auth(self.username,
-                                         new_pass,
+                                         password,
                                          self.tenant_name)
+
+        # Reset auth to get a new token with the new password
+        self.non_admin_users_client.auth_provider.clear_auth()
+        self.non_admin_users_client.auth_provider.credentials.password = (
+            password)
+
+    def _restore_password(self, user_id, old_pass, new_pass):
+        if CONF.identity_feature_enabled.security_compliance:
+            # First we need to clear the password history
+            unique_count = CONF.identity.user_unique_last_password_count
+            for _ in range(unique_count):
+                random_pass = data_utils.rand_password()
+                self._update_password(
+                    user_id, original_password=new_pass, password=random_pass)
+                new_pass = random_pass
+
+        self._update_password(
+            user_id, original_password=new_pass, password=old_pass)
+        # Reset auth again to verify the password restore does work.
+        # Clear auth restores the original credentials and deletes
+        # cached auth data
+        self.non_admin_users_client.auth_provider.clear_auth()
+        # NOTE(lbragstad): Fernet tokens are not subsecond aware and
+        # Keystone should only be precise to the second. Sleep to ensure we
+        # are passing the second boundary before attempting to
+        # authenticate.
+        time.sleep(1)
+        self.non_admin_users_client.auth_provider.set_auth()
+
+    @test.idempotent_id('165859c9-277f-4124-9479-a7d1627b0ca7')
+    def test_user_update_own_password(self):
+        old_pass = self.creds.password
+        old_token = self.non_admin_users_client.token
+        new_pass = data_utils.rand_password()
+        user_id = self.creds.user_id
+
+        # to change password back. important for allow_tenant_isolation = false
+        self.addCleanup(self._restore_password, user_id, old_pass, new_pass)
+
+        # user updates own password
+        self._update_password(
+            user_id, original_password=old_pass, password=new_pass)
 
         # authorize with old token should lead to Unauthorized
         self.assertRaises(exceptions.Unauthorized,
                           self.non_admin_token_client.auth_token,
-                          self.non_admin_client.token)
+                          old_token)
 
         # authorize with old password should lead to Unauthorized
         self.assertRaises(exceptions.Unauthorized,

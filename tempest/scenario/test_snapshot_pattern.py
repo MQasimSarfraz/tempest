@@ -13,16 +13,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo_log import log
-import testtools
-
 from tempest import config
 from tempest.scenario import manager
 from tempest import test
 
 CONF = config.CONF
-
-LOG = log.getLogger(__name__)
 
 
 class TestSnapshotPattern(manager.ScenarioTest):
@@ -36,17 +31,13 @@ class TestSnapshotPattern(manager.ScenarioTest):
 
     """
 
-    def _boot_image(self, image_id, keypair, security_group):
-        security_groups = [{'name': security_group['name']}]
-        create_kwargs = {
-            'key_name': keypair['name'],
-            'security_groups': security_groups
-        }
-        return self.create_server(image=image_id, create_kwargs=create_kwargs)
+    @classmethod
+    def skip_checks(cls):
+        super(TestSnapshotPattern, cls).skip_checks()
+        if not CONF.compute_feature_enabled.snapshot:
+            raise cls.skipException("Snapshotting is not available.")
 
     @test.idempotent_id('608e604b-1d63-4a82-8e3e-91bc665c90b4')
-    @testtools.skipUnless(CONF.compute_feature_enabled.snapshot,
-                          'Snapshotting is not available.')
     @test.services('compute', 'network', 'image')
     def test_snapshot_pattern(self):
         # prepare for booting an instance
@@ -54,9 +45,13 @@ class TestSnapshotPattern(manager.ScenarioTest):
         security_group = self._create_security_group()
 
         # boot an instance and create a timestamp file in it
-        server = self._boot_image(CONF.compute.image_ref, keypair,
-                                  security_group)
-        instance_ip = self.get_server_or_ip(server)
+        server = self.create_server(
+            image_id=CONF.compute.image_ref,
+            key_name=keypair['name'],
+            security_groups=[{'name': security_group['name']}],
+            wait_until='ACTIVE')
+
+        instance_ip = self.get_server_ip(server)
         timestamp = self.create_timestamp(instance_ip,
                                           private_key=keypair['private_key'])
 
@@ -64,11 +59,14 @@ class TestSnapshotPattern(manager.ScenarioTest):
         snapshot_image = self.create_server_snapshot(server=server)
 
         # boot a second instance from the snapshot
-        server_from_snapshot = self._boot_image(snapshot_image['id'],
-                                                keypair, security_group)
+        server_from_snapshot = self.create_server(
+            image_id=snapshot_image['id'],
+            key_name=keypair['name'],
+            security_groups=[{'name': security_group['name']}],
+            wait_until='ACTIVE')
 
         # check the existence of the timestamp file in the second instance
-        server_from_snapshot_ip = self.get_server_or_ip(server_from_snapshot)
+        server_from_snapshot_ip = self.get_server_ip(server_from_snapshot)
         timestamp2 = self.get_timestamp(server_from_snapshot_ip,
                                         private_key=keypair['private_key'])
         self.assertEqual(timestamp, timestamp2)
